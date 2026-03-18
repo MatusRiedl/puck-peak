@@ -1,0 +1,8 @@
+pandas
+requests
+plotly
+fastparquet
+pyarrow
+psutil
+scikit-learn
+diskcache
