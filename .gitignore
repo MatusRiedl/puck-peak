@@ -13,3 +13,4 @@ nhl_age_curves_changelog.txt
 assets/PP.psd
 .cache/
 .pytest_cache/
+tests/
