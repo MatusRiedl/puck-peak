@@ -9,6 +9,7 @@ import streamlit as st
 # --- nhl package imports (each module is documented in nhl/__init__.py) ---
 from nhl.async_preloader import preload_all_categories
 from nhl.baselines import get_historical_baselines, get_team_baselines
+from nhl.cache_warmer import start_background_warmer
 from nhl.chart import render_chart
 from nhl.comparison import (
     _mount_matchup_history_click_bridge,
@@ -98,6 +99,7 @@ st.set_page_config(
 inject_css()
 inject_mobile_dropdown_fix()
 inject_header_bb_logo()
+start_background_warmer()
 
 # =============================================================================
 # URL params — load once per session, before session state defaults are applied.
@@ -407,7 +409,7 @@ st.markdown("---")
 # Keep this visible version synced with the newest changelog entry
 st.markdown(
     "<p style='text-align:center;color:gray;font-size:14px;'>"
-    "Created by Iksperial. v1.00.0 -- 10,944 lines of Python<br>"
+    "Created by Iksperial. v1.00.0 -- 11,208 lines of Python<br>"
     "<em>Data is the only religion that strictly punishes you for ignoring it.</em>"
     "</p>",
     unsafe_allow_html=True,

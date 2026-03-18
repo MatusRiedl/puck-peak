@@ -52,8 +52,20 @@ https://nhl-age-curves.streamlit.app/
 * **Frontend/Framework:** Streamlit
 * **Data & ML:** Pandas, PyArrow, custom hybrid KNN implementation, offline scikit-learn logistic regression for pregame win probability
 * **Visualization:** Plotly
-* **Networking:** Requests (REST API)
+* **Networking:** Requests plus `NHLClient` for retry, request deduplication, rate limiting, and shared-cache-backed NHL API access
+* **Caching:** Streamlit `@st.cache_data` layered on top of shared `diskcache` for cross-process API result reuse
 * **Local Artifacts:** Parquet (`nhl_historical_seasons.parquet`, including additive `Shots` and `TotalTOIMins` support for rarity / `SH%` / `TOI`) and exported win-probability weights (`win_prob_weights.json`)
+
+## Architecture Notes
+
+The current internal source of truth for the implemented cache and data-access
+architecture is `foundation_phase.md`.
+
+Current runtime highlights:
+- `nhl/api.py` provides the central `NHLClient` wrapper for outbound NHL HTTP
+- `nhl/cache.py` provides the shared `diskcache` layer with an in-process fallback
+- `nhl/cache_warmer.py` provides an optional background warmer, enabled with `PUCKPEAK_CACHE_WARMER_ENABLED=1`
+- `nhl/async_preloader.py` still exists, but now plays a smaller session-local supporting role
 
 ## Code Structure
 
@@ -63,6 +75,9 @@ session-state orchestrator and render pass; most logic lives in the package modu
 ```
 app.py                   entry point and session-state orchestrator
 nhl/
+    api.py               central NHLClient with retry, dedup, and rate limiting
+    cache.py             shared cache wrapper backed by diskcache or an in-process fallback
+    cache_warmer.py      optional background cache warmer for live, seasonal, and historical paths
     constants.py         URLs, team list, stat caps, NHLe multipliers
     styles.py            CSS injection
     era.py               era-adjustment math (no Streamlit dependency)
@@ -82,7 +97,7 @@ nhl/
     stanley_cup.py       standings-board and Cup-pick builder
     url_params.py        URL query param encode/decode for shareable links and chart season state
     schedule.py          live defaults, upcoming games, featured-player helpers, matchup history, and runtime matchup inference
-    async_preloader.py   background cache warming for Goalie/Team categories
+    async_preloader.py   older session-local category preloader kept as an additive helper
 scraper.py               standalone script to refresh the parquet file, including additive Shots / TotalTOIMins columns
 train_win_prob.py        standalone script to train and export pregame win-probability weights
 nhl_historical_seasons.parquet   ML backbone (generate with scraper.py)
@@ -99,3 +114,6 @@ win_prob_weights.json    offline-trained logistic-regression weights used at run
 7. If you want to refresh the historical parquet, run `python scraper.py`
 8. If you want to retrain the pregame win-probability model, run `python train_win_prob.py`
 9. Launch the app by opening a terminal in the folder and write `streamlit run app.py`
+
+Optional:
+- Set `PUCKPEAK_CACHE_WARMER_ENABLED=1` if you want the process-local background cache warmer to run in development or production.

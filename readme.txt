@@ -2,18 +2,30 @@ PUCK PEAK - TECHNICAL HANDOVER DOCUMENT
 
 For the next AI or human who has to touch this thing at 2am.
 Entry point: `app.py`. Most logic lives in `nhl/`.
+This is the active long-form handover doc. Exact cache migration details live in
+`foundation_phase.md`; the pre-foundation writeup in
+`docs/archive/pre_foundation_architecture_overview.md` is historical only.
 
 SECTION 1 - ARCHITECTURE OVERVIEW
 ---------------------------------
 This is a modular Streamlit app.
 There is no backend, no database, and no auth.
 Streamlit reruns `app.py` top-to-bottom on every interaction, so persistent state lives in
-`st.session_state` and heavy work lives behind `@st.cache_data`.
+`st.session_state`.
 
-The app has three data sources/artifacts:
+Expensive local artifacts still live behind `@st.cache_data`, but NHL HTTP is no longer a
+simple "`@st.cache_data` only" story. The normal API-backed read path is:
+
+`public loader/helper -> @st.cache_data -> NHLClient.get() -> shared NHLCache -> HTTP`
+
+`NHLCache` lives in `nhl/cache.py` and uses on-disk `diskcache` at `.cache/nhl_api` when
+available, with an in-process dict fallback if `diskcache` is not installed.
+
+The app has four data sources/artifacts:
 - LIVE: NHL public APIs
 - LOCAL: `nhl_historical_seasons.parquet`
 - LOCAL: `win_prob_weights.json`
+- LOCAL RUNTIME CACHE: `.cache/nhl_api` shared disk cache when `diskcache` is available
 
 The parquet file powers KNN projection, historical baselines, and Season Snapshot age-rarity
 comparisons. Without it, the app still renders real data, but projection, baseline, and rarity
@@ -33,9 +45,11 @@ and stacked matchup cards. The primary trigger is a small JS bridge mounted thro
 `st.components.v2.component()`; the old `mh=AWY,HOME` query-param path stays as fallback.
 
 `app.py` is the session-state coordinator and render pass. It:
+- attempts to start the optional process-local background cache warmer early through `start_background_warmer()`; this is a no-op unless the env flag enables it
 - loads URL params once
 - seeds session state
 - auto-loads a live or recent game once per session when appropriate
+- runs the older session-local `async_preloader.py` warm-up once per session for non-active categories
 - renders sidebar and controls
 - dispatches to `process_players()` or `process_teams()`
 - renders the chart-column `Chart season` picker, the right-rail predictions area, and the comparison panel
@@ -44,10 +58,14 @@ SECTION 2 - FILE STRUCTURE
 --------------------------
 Top level:
 - `app.py` - session-state orchestrator and render pass
+- `foundation_phase.md` - authoritative cache/foundation notes and migration details
+- `cache_strategy.md` - design rationale for the `NHLClient` / shared-cache direction
 - `scraper.py` - manual historical parquet refresh
 - `train_win_prob.py` - offline trainer for pregame win-probability weights
 - `nhl_historical_seasons.parquet` - historical seasons used by baselines and KNN
 - `win_prob_weights.json` - offline-trained logistic-regression artifact used at runtime
+- `.cache/nhl_api/` - shared runtime disk cache directory when `diskcache` is installed
+- `docs/archive/pre_foundation_architecture_overview.md` - archived pre-foundation architecture note; keep it historical
 - `requirements.txt`
 
 `nhl/` modules:
@@ -55,7 +73,9 @@ Top level:
 - `constants.py` - shared constants and metric sets
 - `styles.py` - CSS injection helpers
 - `era.py` - era multipliers and historical adjustment helpers
-- `data_loaders.py` - cached API fetchers and parquet loaders
+- `cache.py` - shared cache backend, TTL tiers, and `effective_ttl()` helpers
+- `api.py` - central `NHLClient` with rate limiting, retry, deduplication, and cache-aware HTTP
+- `data_loaders.py` - app-facing parquet loaders and NHL data wrappers built on the cache/client layer
 - `rarity.py` - historical age-rarity ranking, role splits, and top-season leaderboard payloads
 - `baselines.py` - historical and team baseline builders
 - `knn_engine.py` - KNN projection and fallback logic
@@ -71,7 +91,8 @@ Top level:
 - `stanley_cup.py` - current-standings / Cup-pick board builder
 - `url_params.py` - compact share-link encode/decode with legacy-link sanitization and canonicalization
 - `schedule.py` - live defaults, upcoming games, featured players, matchup-history loading, and runtime win-prob inference
-- `async_preloader.py` - background cache warming for non-active categories
+- `cache_warmer.py` - optional process-local daemon warmer for shared-cache live / seasonal / historical paths
+- `async_preloader.py` - older session-local additive preloader for non-active categories inside the current worker
 
 SECTION 3 - EXTERNAL API ENDPOINTS
 ----------------------------------
@@ -377,44 +398,34 @@ Ranking rules:
 
 SECTION 10 - CACHING STRATEGY
 -----------------------------
-Permanent cache:
-- `load_historical_data()`
-- `load_win_prob_weights()`
-- `get_historical_baselines()`
-- `get_team_baselines()`
-- `get_age_rarity_summary()`
+This section is the current runtime summary. For exact migration history, per-function rollout
+notes, and tier tables, use `foundation_phase.md`.
 
-Hourly cache (`ttl=3600`):
-- `get_player_landing()`
-- `get_player_identity_summary()`
-- `load_all_team_seasons()`
-- `get_top_50()`
-- `get_top_50_goalies()`
-- `get_team_roster()`
-- `get_player_raw_stats()`
-- `get_player_season_game_log()`
-- `get_player_available_nhl_seasons()`
-- `get_team_available_nhl_seasons()`
-- `get_team_season_game_log()`
-- `get_matchup_history()`
-- `get_team_season_summary()`
-- `get_team_all_time_stats()`
-- `get_season_leaderboard()`
-- `get_player_season_rank_map()`
-- `get_team_season_rank_map()`
-- `fetch_all_time_records()`
-- `get_id_to_name_map()`
-- `search_player()`
-- `get_clone_details_map()`
-- `get_featured_players()`
-- `_get_cached_club_stats()`
-- `_resolve_player_name()` in `rarity.py`
+Current mental model:
+- permanent local artifacts still use `@st.cache_data` directly: `load_historical_data()`, `load_win_prob_weights()`, baseline builders, and other parquet-derived helpers stay process-local and are read from disk rather than HTTP
+- most NHL API-backed public helpers in `data_loaders.py` and `schedule.py` still expose `@st.cache_data` wrappers, but those wrappers now sit in front of `NHLClient`, not in place of it
+- `nhl/api.py` is the HTTP chokepoint: `get_client().get()` owns the shared cache lookup, `requests.Session`, per-domain token-bucket rate limiting, retry with exponential backoff + jitter, and in-flight request deduplication by cache key
+- `nhl/cache.py` is the shared cache layer: default backend is `diskcache` in `.cache/nhl_api` with LRU eviction and a 200 MB size limit; if `diskcache` is missing, the app falls back to a bounded in-process dict cache
+- the practical read path for API-backed data is `@st.cache_data -> NHLClient -> shared diskcache -> HTTP`; local artifact loaders stop at the first layer because they never leave the machine
+- `fetch_all_time_records()` is the notable special case: page fetches go through `NHLClient` for rate limiting and retry, then the assembled result is stored directly in the shared cache with `get_cache()`
 
-Five-minute cache (`ttl=300`):
-- `get_live_or_recent_game()`
-- `get_upcoming_games()`
-- `get_game_details()`
-- `get_game_win_probabilities()`
+Shared-cache tier behavior in `nhl/cache.py`:
+- `T0_TTL = None` for permanent local artifacts and process-lifetime data derived from local files
+- `T1_TTL = 86400` for historical / effectively immutable remote data such as records, top-50 lists, and past-season payloads
+- `T2_DEFAULT_TTL = 3600` for semi-static seasonal data such as rosters, standings, player landing payloads, and current-season summaries
+- `T3_DEFAULT_TTL = 120` for live or near-real-time score surfaces
+- `effective_ttl(season_year)` promotes closed seasons to `T1` and leaves the current season on `T2`, so past season logs and summaries naturally harden into the slower-refresh tier
+
+What matters operationally:
+- `st.cache_data` is now the outer per-process short-circuit, not the whole caching architecture
+- the shared disk cache is the cross-session / cross-worker layer on the same filesystem and is the main reason repeat HTTP calls can be avoided across reruns and warm workers
+- identical in-flight requests with the same cache key are collapsed inside `NHLClient`, so the app does not stampede the same endpoint during concurrent cold paths
+- retry only happens for transient failures (`429`, `500`, `502`, `503`, `504`, connection errors, timeouts); `400`, `403`, and `404` are treated as non-retryable
+- per-domain rate defaults are conservative and live in `nhl/api.py`; env vars can override them without code changes
+
+Background warming now has two different jobs:
+- `cache_warmer.py` is the main optional shared-cache warmer. When `PUCKPEAK_CACHE_WARMER_ENABLED=1`, `app.py` starts live, seasonal, and historical daemon loops that warm the same public functions the UI already uses.
+- `async_preloader.py` still exists, but it is the older additive session-local helper. It runs once per session to warm non-active categories in the current worker and should not be described as the primary cache architecture anymore.
 
 SECTION 10A - PREGAME WIN PROBABILITY
 -------------------------------------
@@ -496,15 +507,18 @@ SECTION 12 - MODULAR PACKAGE STRUCTURE
 --------------------------------------
 Import shape:
 - leaf-ish modules: `constants`, `styles`, `era`, `url_params`
-- data layer: `data_loaders`, `schedule`, `baselines`
-- pure processing: `knn_engine`, `player_pipeline`, `team_pipeline`, `async_preloader`
+- runtime/cache layer: `cache`, `api`, `data_loaders`, `schedule`, `baselines`, `cache_warmer`
+- pure processing: `knn_engine`, `player_pipeline`, `team_pipeline`
+- additive preload helper: `async_preloader`
 - UI: `controls`, `sidebar`, `dialog`, `chart`, `comparison`
 - `app.py` ties everything together
 
 Module responsibilities:
 - `constants.py` - shared URLs, metric lists, caps, floors, league multipliers
 - `era.py` - scoring-era multipliers and historical adjustment helpers
-- `data_loaders.py` - all parquet and network I/O; keep silent fallbacks
+- `cache.py` - shared cache backend, TTL constants, `effective_ttl()`, and the diskcache/dict fallback
+- `api.py` - `NHLClient` singleton, request session, rate limiting, retry/backoff, in-flight deduplication, and shared-cache integration
+- `data_loaders.py` - local artifact loaders plus app-facing NHL data wrappers; most HTTP should route through `api.py`
 - `rarity.py` - age-rarity ranking payloads, role splits, and top-season leaderboard assembly
 - `baselines.py` - cached historical and team baseline builders
 - `knn_engine.py` - clone matching, hybrid-delta projection, stat caps, fallback projection
@@ -522,9 +536,12 @@ Module responsibilities:
 - `stanley_cup.py` - standings-board assembly and Cup-pick summarization
 - `url_params.py` - compact share-link encoder/decoder with legacy-link sanitization and canonicalization
 - `schedule.py` - live/recent matchup detection, upcoming games, featured players, matchup history, and runtime pregame win-prob inference
-- `async_preloader.py` - background warming of non-active category caches
+- `cache_warmer.py` - optional live / seasonal / historical daemon warmer for shared-cache entry points
+- `async_preloader.py` - older per-session non-active-category warm-up inside the current worker
 
 Key integration notes:
+- `app.py` calls `start_background_warmer()` during startup, but the warmer is disabled unless `PUCKPEAK_CACHE_WARMER_ENABLED` is truthy
+- `app.py` still calls `preload_all_categories()` once per session after default seeding; treat that as additive latency smoothing, not the primary cache strategy
 - `schedule.py` only auto-seeds the board on first session load and only if a shared URL did not already populate players or teams
 - `comparison.py` stores tab memory per category via `panel_tab_skater`, `panel_tab_goalie`, and `panel_tab_team`
 - `comparison.py` now prefers a JS trigger from `st.components.v2.component()` for prediction-card
@@ -544,6 +561,7 @@ Key integration notes:
 - `url_params.py` supports compact ID-only links, legacy `id|name` / `abbr|name` links, sanitizes
   legacy display names at ingest, and handles the chart-season selector without redundantly
   encoding forced games mode
+- normal NHL API call sites should go through `get_client().get()`; `discover_all_leagues()` is the intentional audit-helper exception that still uses direct `requests.get()`
 - `scraper.py` must keep the historical parquet additive-only; `Shots` and `TotalTOIMins` are now required for full rarity coverage, but old baseline / KNN columns must keep their meaning
 - age-rarity top-5 names intentionally reuse cached player landing data through `get_player_identity_summary()` instead of scraping a second historical names artifact
 

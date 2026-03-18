@@ -169,3 +169,43 @@ This function paginates across many API pages, then assembles the result. Per-pa
 - 7 new tests in `BroadMigrationTests` (test_data_loaders.py) verifying cache keys, TTLs, and None handling.
 - 4 new tests in `ScheduleMigrationTests` (test_schedule.py) verifying cache keys and failure paths.
 - Total: 56 tests passing in test_data_loaders.py + test_schedule.py.
+
+---
+
+## Phase 3 - Cache Warmer and Background Refresh
+
+An optional process-local cache warmer now runs in daemon threads and warms the
+same public functions the UI already uses. This keeps the shared diskcache warm
+through the normal app path while preserving the existing `st.cache_data` layer
+inside each Streamlit worker.
+
+### Startup and Enablement
+
+- Disabled by default. The app behaves as before unless `PUCKPEAK_CACHE_WARMER_ENABLED=1`.
+- The warmer starts from `app.py` through `start_background_warmer()`.
+- A module-level lock/flag ensures only one warmer starts per worker process.
+- The existing per-session `async_preloader.py` path remains in place for now.
+
+### Warmed Functions by Tier
+
+| Tier | Thread | Default interval | Env var | Warmed public functions |
+|------|--------|------------------|---------|-------------------------|
+| Live | `cache-warmer-live` | 300s (5m) | `PUCKPEAK_CACHE_WARMER_LIVE_INTERVAL_SECONDS` | `get_live_or_recent_game()`, `get_featured_players(home, away)` when a matchup is found, `get_upcoming_games(limit=8, days_ahead=14)` |
+| Seasonal | `cache-warmer-seasonal` | 3600s (1h) | `PUCKPEAK_CACHE_WARMER_SEASONAL_INTERVAL_SECONDS` | `load_all_team_seasons()`, `get_current_nhl_standings()`, seeded `get_team_roster()` calls for `EDM`, `PIT`, `WSH`, `COL`, `TOR`, `NYR`, seeded `get_player_landing()` calls for McDavid `8478402`, Crosby `8471675`, Ovechkin `8471214`, MacKinnon `8477492`, Matthews `8479318`, Shesterkin `8478048` |
+| Historical | `cache-warmer-historical` | 21600s (6h) | `PUCKPEAK_CACHE_WARMER_HISTORICAL_INTERVAL_SECONDS` | `get_id_to_name_map("Skater")`, `get_clone_details_map("Skater")`, `get_id_to_name_map("Goalie")`, `get_clone_details_map("Goalie")`, `get_top_50("Points")`, `get_top_50("Goals")`, `get_top_50("Assists")`, `get_top_50_goalies()` |
+
+### Safety and Load-Shaping
+
+- Each tier runs sequentially on its own daemon thread. The warmer does not fan out parallel API bursts.
+- All tasks are wrapped in exception handling and only log failures. A warm-up error never crashes the app process.
+- Initial startup is staggered with jitter to reduce thundering-herd deploy behavior:
+  - live: 0-15s
+  - seasonal: 15-60s
+  - historical: 60-180s
+- The warmer uses the existing `NHLClient`, so it still respects request deduplication, retry, and per-domain rate limiting.
+
+### Tuning Notes
+
+- The default intervals are conservative and safe for local development and production.
+- Most default intervals are at or above the public wrapper TTLs, so the warmer usually refreshes after the in-process cache can expire instead of just re-touching hot `st.cache_data` entries.
+- Lower intervals improve hit rate and freshness for active users, but they also increase background API traffic. If production load is light, prefer the defaults before making the live or seasonal tiers more aggressive.

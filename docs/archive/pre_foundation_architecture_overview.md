@@ -1,4 +1,11 @@
-# Puck Peak -- Architecture & Scaling Analysis
+# Puck Peak - Pre-Foundation Architecture and Scaling Analysis
+
+Archived note: this document captures the pre-`NHLClient`, pre-shared-cache
+architecture and the target-state scaling analysis that informed the later
+foundation and caching work. It is historical context only.
+
+Current implemented source of truth:
+- `foundation_phase.md`
 
 ## 1. Current Runtime Architecture
 

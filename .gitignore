@@ -1,8 +1,6 @@
 .claude/
 CLAUDE.md
 AI_CHANGE_CHECKLIST.md
-.github/
-tests/
 debug/
 debug/.ipynb_checkpoints/
 nhl_age_curves_changelog.txt
@@ -14,3 +12,4 @@ nhl_age_curves_changelog.txt
 .vscode/
 assets/PP.psd
 .cache/
+.pytest_cache/
