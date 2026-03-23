@@ -2098,6 +2098,11 @@ def render_chart(
         ".js-plotly-plot .hoverlayer .hovertext {"
         "  filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.62));"
         "}"
+        "@media (max-width: 768px) {"
+        "  .js-plotly-plot .nsewdrag {"
+        "    touch-action: pan-y !important;"
+        "  }"
+        "}"
         "</style>",
         unsafe_allow_html=True,
     )
@@ -2266,6 +2271,7 @@ def render_chart(
         updates['annotations[0].x'] = calcResponsiveYAxisCueX(width);
         updates['annotations[0].y'] = calcResponsiveYAxisCueY(width);
         updates['xaxis.tickangle'] = (IS_AGE_MODE || IS_GAMES_MODE) ? 0 : -45;
+        if (width <= 768) {{ updates['dragmode'] = false; }}
         Plotly.relayout(plot, updates).then(function() {{
             syncToolbarTitleOffset(plot, window.parent);
         }});
