@@ -169,7 +169,8 @@ def run_knn_projection(
     """Project future ages with KNN clones and return rows plus clone details."""
     max_age       = career_df['Age'].max()
     base_name     = career_df['BaseName'].iloc[0] if 'BaseName' in career_df.columns else ''
-    career_paced  = career_df[metric].copy()
+    # Normalize to float so partial-season pacing can safely scale integer season totals.
+    career_paced  = pd.to_numeric(career_df[metric], errors='coerce').astype(float)
 
     # Mid-season pacing: extrapolate the last (current) season to 82 GP
     if (season_type != "Playoffs"
@@ -183,7 +184,10 @@ def run_knn_projection(
 
     match_ages  = career_df['Age'].tolist()
     match_vals  = career_paced.tolist()
-    current_val = float(career_df.loc[career_df['Age'] == max_age, metric].values[0])
+    current_candidates = career_paced.loc[career_df['Age'] == max_age].dropna()
+    if current_candidates.empty:
+        return [], []
+    current_val = float(current_candidates.iloc[-1])
 
     if hist_df.empty or metric not in ML_SUPPORTED_METRICS:
         return [], []

@@ -102,9 +102,11 @@ CHART_CLICK_BRIDGE_COMPONENT_NAME = "comparison_chart_click_bridge"
 CHART_CLICK_BRIDGE_MOUNT_KEY = "comparison_chart_click_bridge"
 CHART_CLICK_BRIDGE_ANCHOR_ID = "comparison-main-plotly"
 LAST_HANDLED_CHART_CLICK_NONCE_SESSION_KEY = "_last_handled_chart_click_nonce"
+LAST_HANDLED_NATIVE_SELECTION_SESSION_KEY = "_last_handled_native_chart_selection"
 CHART_CLICK_BRIDGE_BIND_ATTEMPTS = 20
 CHART_CLICK_BRIDGE_BIND_DELAY_MS = 150
 CHART_HOVER_DISTANCE = 32
+MOBILE_TOUCH_BREAKPOINT_PX = 768
 CHART_CLICK_BRIDGE_JS = f"""
 export default function(component) {{
     const {{ data, setTriggerValue }} = component;
@@ -128,6 +130,8 @@ export default function(component) {{
     const anchorId = String(bridgeData.anchor_id || '').trim();
     const bindAttempts = Number(bridgeData.bind_attempts || 0) || {CHART_CLICK_BRIDGE_BIND_ATTEMPTS};
     const bindDelayMs = Number(bridgeData.bind_delay_ms || 0) || {CHART_CLICK_BRIDGE_BIND_DELAY_MS};
+    const mobileTouchBreakpointPx = Number(bridgeData.mobile_touch_breakpoint_px || 0)
+        || {MOBILE_TOUCH_BREAKPOINT_PX};
 
     function getCurrentTargetPlot(parent) {{
         const plots = Array.prototype.slice.call(parent.document.querySelectorAll('.js-plotly-plot'));
@@ -161,6 +165,38 @@ export default function(component) {{
 
     let cleanup = null;
     let retryTimer = null;
+
+    function isTouchViewport(parent) {{
+        try {{
+            return Boolean(
+                parent.matchMedia
+                && parent.matchMedia(`(max-width: ${{mobileTouchBreakpointPx}}px) and (pointer: coarse)`).matches
+            );
+        }} catch (err) {{
+            return false;
+        }}
+    }}
+
+    function enforceTouchScrollBehavior(plot, parent) {{
+        if (!isTouchViewport(parent)) {{
+            return;
+        }}
+
+        [
+            plot,
+            plot && plot.querySelector('.plot-container'),
+            plot && plot.querySelector('.svg-container'),
+            plot && plot.querySelector('.main-svg'),
+            plot && plot.querySelector('.draglayer'),
+            plot && plot.querySelector('.nsewdrag'),
+        ].forEach(function(node) {{
+            if (!node || !node.style) {{
+                return;
+            }}
+            node.style.touchAction = 'pan-y pinch-zoom';
+            node.style.webkitTouchCallout = 'none';
+        }});
+    }}
 
     // Resolve the window that contains the Plotly chart.
     // On localhost the chart lives in window.parent; on Streamlit Cloud
@@ -215,6 +251,8 @@ export default function(component) {{
             return;
         }}
 
+        enforceTouchScrollBehavior(plot, parent);
+
         const handler = function(event) {{
             const points = event && Array.isArray(event.points) ? event.points : [];
             if (!points.length) {{
@@ -253,8 +291,7 @@ export default function(component) {{
         const TAP_MAX_DURATION = 400;
 
         const plotArea = plot.querySelector('.nsewdrag') || plot;
-
-        plotArea.addEventListener('touchstart', function(e) {{
+        const handleTouchStart = function(e) {{
             if (e.touches.length === 1) {{
                 touchState = {{
                     startX: e.touches[0].clientX,
@@ -264,9 +301,9 @@ export default function(component) {{
             }} else {{
                 touchState = null;
             }}
-        }}, {{ passive: true }});
+        }};
 
-        plotArea.addEventListener('touchmove', function(e) {{
+        const handleTouchMove = function(e) {{
             if (!touchState || e.touches.length !== 1) {{
                 touchState = null;
                 return;
@@ -276,9 +313,9 @@ export default function(component) {{
             if (Math.sqrt(dx * dx + dy * dy) > TAP_MAX_DISTANCE) {{
                 touchState = null;
             }}
-        }}, {{ passive: true }});
+        }};
 
-        plotArea.addEventListener('touchend', function() {{
+        const handleTouchEnd = function() {{
             if (!touchState) return;
             var elapsed = Date.now() - touchState.startTime;
             touchState = null;
@@ -303,7 +340,11 @@ export default function(component) {{
                 curve_number: Number.isInteger(point.curveNumber) ? point.curveNumber : null,
                 point_number: Number.isInteger(point.pointNumber) ? point.pointNumber : null,
             }});
-        }}, {{ passive: true }});
+        }};
+
+        plotArea.addEventListener('touchstart', handleTouchStart, {{ passive: true }});
+        plotArea.addEventListener('touchmove', handleTouchMove, {{ passive: true }});
+        plotArea.addEventListener('touchend', handleTouchEnd, {{ passive: true }});
 
         const localCleanup = function() {{
             if (retryTimer) {{
@@ -316,6 +357,13 @@ export default function(component) {{
                 }} else if (typeof plot.off === 'function') {{
                     plot.off('plotly_click', handler);
                 }}
+            }} catch (err) {{
+                // Ignore teardown races when Streamlit replaces the plot DOM.
+            }}
+            try {{
+                plotArea.removeEventListener('touchstart', handleTouchStart);
+                plotArea.removeEventListener('touchmove', handleTouchMove);
+                plotArea.removeEventListener('touchend', handleTouchEnd);
             }} catch (err) {{
                 // Ignore teardown races when Streamlit replaces the plot DOM.
             }}
@@ -550,6 +598,7 @@ def _mount_chart_click_bridge(chart_instance_id: str) -> str | None:
                 "anchor_id": CHART_CLICK_BRIDGE_ANCHOR_ID,
                 "bind_attempts": CHART_CLICK_BRIDGE_BIND_ATTEMPTS,
                 "bind_delay_ms": CHART_CLICK_BRIDGE_BIND_DELAY_MS,
+                "mobile_touch_breakpoint_px": MOBILE_TOUCH_BREAKPOINT_PX,
             },
             separators=(",", ":"),
         ),
@@ -887,12 +936,12 @@ def _handle_native_chart_selection(
     if not points:
         # Deselection (user clicked background): clear nonce so the same point
         # can be re-opened on the next click without a chart remount.
-        session_state_set(LAST_HANDLED_CHART_CLICK_NONCE_SESSION_KEY, None)
+        session_state_set(LAST_HANDLED_NATIVE_SELECTION_SESSION_KEY, None)
         return False
 
     if len(points) != 1:
         # Unexpected multi-point payload — clear stale dedup state and bail.
-        session_state_set(LAST_HANDLED_CHART_CLICK_NONCE_SESSION_KEY, None)
+        session_state_set(LAST_HANDLED_NATIVE_SELECTION_SESSION_KEY, None)
         return False
 
     pt = points[0]
@@ -904,9 +953,9 @@ def _handle_native_chart_selection(
     if suppress_dialogs or not dialog_slot_available():
         return False
 
-    if session_state_get(LAST_HANDLED_CHART_CLICK_NONCE_SESSION_KEY) == selection_key:
+    if session_state_get(LAST_HANDLED_NATIVE_SELECTION_SESSION_KEY) == selection_key:
         return False
-    session_state_set(LAST_HANDLED_CHART_CLICK_NONCE_SESSION_KEY, selection_key)
+    session_state_set(LAST_HANDLED_NATIVE_SELECTION_SESSION_KEY, selection_key)
 
     # Resolve trace name from the figure (more reliable than payload fields)
     try:
@@ -2090,6 +2139,7 @@ def render_chart(
             "resetScale2d", "zoomIn2d", "zoomOut2d",
         ],
         "displaylogo": False,
+        "scrollZoom": False,
     }
 
     st.markdown("<div id='comparison-main-plotly'></div>", unsafe_allow_html=True)
@@ -2099,8 +2149,13 @@ def render_chart(
         "  filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.62));"
         "}"
         "@media (max-width: 768px) {"
+        "  .js-plotly-plot,"
+        "  .js-plotly-plot .plot-container,"
+        "  .js-plotly-plot .svg-container,"
+        "  .js-plotly-plot .main-svg,"
+        "  .js-plotly-plot .draglayer,"
         "  .js-plotly-plot .nsewdrag {"
-        "    touch-action: pan-y !important;"
+        "    touch-action: pan-y pinch-zoom !important;"
         "  }"
         "}"
         "</style>",
@@ -2115,6 +2170,7 @@ def render_chart(
         on_select       = "rerun",
         selection_mode  = "points",
     )
+    chart_click_trigger_value = _mount_chart_click_bridge(chart_key)
 
     # ------------------------------------------------------------------
     # JS: responsive dtick + pan/zoom clamping
@@ -2271,7 +2327,15 @@ def render_chart(
         updates['annotations[0].x'] = calcResponsiveYAxisCueX(width);
         updates['annotations[0].y'] = calcResponsiveYAxisCueY(width);
         updates['xaxis.tickangle'] = (IS_AGE_MODE || IS_GAMES_MODE) ? 0 : -45;
-        if (width <= 768) {{ updates['dragmode'] = false; }}
+        if (width <= 768) {{
+            updates['dragmode'] = false;
+            updates['xaxis.fixedrange'] = true;
+            updates['yaxis.fixedrange'] = true;
+        }} else {{
+            updates['dragmode'] = 'zoom';
+            updates['xaxis.fixedrange'] = false;
+            updates['yaxis.fixedrange'] = false;
+        }}
         Plotly.relayout(plot, updates).then(function() {{
             syncToolbarTitleOffset(plot, window.parent);
         }});
@@ -2592,7 +2656,7 @@ def render_chart(
             parent.document.querySelectorAll('.js-plotly-plot').forEach(function(p) {{
                 var range = getCurrentXRange(p);
                 var width = p.offsetWidth || parent.innerWidth;
-                Plotly.relayout(p, {{
+                var updates = {{
                     'xaxis.dtick': calcDtick(width, range),
                     'height': calcResponsiveChartHeight(width),
                     'xaxis.tickangle': (IS_AGE_MODE || IS_GAMES_MODE) ? 0 : -45,
@@ -2601,7 +2665,17 @@ def render_chart(
                     'yaxis.tickfont.size': calcResponsiveYAxisTickFontSize(width),
                     'annotations[0].x': calcResponsiveYAxisCueX(width),
                     'annotations[0].y': calcResponsiveYAxisCueY(width),
-                }}).then(function() {{
+                }};
+                if (width <= 768) {{
+                    updates['dragmode'] = false;
+                    updates['xaxis.fixedrange'] = true;
+                    updates['yaxis.fixedrange'] = true;
+                }} else {{
+                    updates['dragmode'] = 'zoom';
+                    updates['xaxis.fixedrange'] = false;
+                    updates['yaxis.fixedrange'] = false;
+                }}
+                Plotly.relayout(p, updates).then(function() {{
                     syncToolbarTitleOffset(p, parent);
                 }});
             }});
@@ -2612,7 +2686,7 @@ def render_chart(
 }})();
 </script>""", height=0)
 
-    _handle_native_chart_selection(
+    _native_dialog_opened = _handle_native_chart_selection(
         _native_selection,
         fig,
         suppress_dialogs=suppress_dialogs,
@@ -2631,3 +2705,23 @@ def render_chart(
         stat_category=stat_category,
         do_era=do_era,
     )
+    if not _native_dialog_opened:
+        _show_chart_dialog_from_trigger(
+            chart_click_trigger_value,
+            chart_key,
+            suppress_dialogs=suppress_dialogs,
+            team_mode=team_mode,
+            games_mode=games_mode,
+            is_single_season_team_games=is_single_season_team_games,
+            has_exact_game_custom_data=has_exact_game_custom_data,
+            metric=metric,
+            final_df=final_df,
+            raw_dfs_cache=raw_dfs_cache,
+            season_type=season_type,
+            selected_season=selected_season,
+            do_cumul=do_cumul,
+            ml_clones_dict=ml_clones_dict,
+            historical_baselines=historical_baselines,
+            stat_category=stat_category,
+            do_era=do_era,
+        )

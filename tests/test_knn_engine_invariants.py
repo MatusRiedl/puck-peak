@@ -2,6 +2,7 @@ import unittest
 
 import pandas as pd
 
+from nhl.constants import CURRENT_SEASON_YEAR
 from nhl.knn_engine import _apply_stat_cap, run_knn_projection, run_linear_fallback
 
 
@@ -228,6 +229,44 @@ class KNNEngineInvariantTests(unittest.TestCase):
         self.assertEqual(len(clone_names), 10)
         self.assertEqual(proj_rows[0]["Age"], 36)
         self.assertAlmostEqual(float(proj_rows[0]["Points"]), 25.0)
+
+    def test_run_knn_projection_paces_integer_current_season_without_dtype_error(self):
+        """Allow partial-season pacing on integer counting stats without crashing."""
+        career_df = pd.DataFrame(
+            {
+                "Age": [30, 31],
+                "Points": [20, 25],
+                "SeasonYear": [CURRENT_SEASON_YEAR - 1, CURRENT_SEASON_YEAR],
+                "GP": [82, 41],
+                "BaseName": ["Landing Page Skater", "Landing Page Skater"],
+            }
+        )
+        hist_rows = []
+        for player_id in range(1, 11):
+            hist_rows.extend(
+                [
+                    {"PlayerID": player_id, "Position": "C", "Age": 30, "SeasonYear": 2010, "Points": 20.0},
+                    {"PlayerID": player_id, "Position": "C", "Age": 31, "SeasonYear": 2011, "Points": 50.0},
+                    {"PlayerID": player_id, "Position": "C", "Age": 32, "SeasonYear": 2012, "Points": 60.0},
+                ]
+            )
+
+        proj_rows, clone_names = run_knn_projection(
+            career_df=career_df,
+            metric="Points",
+            hist_df=pd.DataFrame(hist_rows),
+            is_goalie=False,
+            pos_code="C",
+            do_era=False,
+            season_type="Regular",
+            stat_category="Skater",
+            id_to_name_map={player_id: f"Clone {player_id}" for player_id in range(1, 11)},
+            clone_details_map={},
+        )
+
+        self.assertEqual(len(clone_names), 10)
+        self.assertEqual(proj_rows[0]["Age"], 32)
+        self.assertGreater(float(proj_rows[0]["Points"]), 0.0)
 
 
 if __name__ == "__main__":
