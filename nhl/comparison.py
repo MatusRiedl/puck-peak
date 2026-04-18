@@ -1395,6 +1395,12 @@ def _render_overview_player_card(
     is_goalie = stat_category == "Goalie"
     season_mode = _is_selected_season_mode(selected_season)
     use_last_visible_total = season_mode and do_cumul
+    # In whole-career cumulative mode the pipeline overwrites stat columns with
+    # running totals.  Games mode cumulates *all* counting stats; age mode only
+    # cumulates the active metric.  Detect which case we're in so the card
+    # reads the final cumulative value instead of summing already-cumulated rows.
+    games_mode_cumul = do_cumul and not season_mode and "CumGP" in proc_df.columns
+    age_mode_cumul = do_cumul and not season_mode and "CumGP" not in proc_df.columns
     player_colors = _get_player_chart_colors()
     player_color = player_colors.get(name)
     season_rank_map = (
@@ -1419,18 +1425,26 @@ def _render_overview_player_card(
         else ""
     )
 
-    career_gp = _get_visible_stat_total(real, "GP", use_last_visible_total)
+    def _use_last(col: str) -> bool:
+        """Should this column read the last cumulative value instead of summing?"""
+        if use_last_visible_total or games_mode_cumul:
+            return True
+        if age_mode_cumul and col == metric:
+            return True
+        return False
+
+    career_gp = _get_visible_stat_total(real, "GP", _use_last("GP"))
     if is_goalie:
-        career_w = _get_visible_stat_total(real, "Wins", use_last_visible_total)
-        career_so = _get_visible_stat_total(real, "Shutouts", use_last_visible_total)
-        career_sv = _get_visible_stat_total(real, "Saves", use_last_visible_total)
+        career_w = _get_visible_stat_total(real, "Wins", _use_last("Wins"))
+        career_so = _get_visible_stat_total(real, "Shutouts", _use_last("Shutouts"))
+        career_sv = _get_visible_stat_total(real, "Saves", _use_last("Saves"))
         stats_row = _build_card_stat_row(
             [("W", career_w), ("SO", career_so), ("SV", f"{career_sv:,}"), ("GP", career_gp)]
         )
     else:
-        career_g = _get_visible_stat_total(real, "Goals", use_last_visible_total)
-        career_a = _get_visible_stat_total(real, "Assists", use_last_visible_total)
-        career_pt = _get_visible_stat_total(real, "Points", use_last_visible_total)
+        career_g = _get_visible_stat_total(real, "Goals", _use_last("Goals"))
+        career_a = _get_visible_stat_total(real, "Assists", _use_last("Assists"))
+        career_pt = _get_visible_stat_total(real, "Points", _use_last("Points"))
         stats_row = _build_card_stat_row(
             [("G", career_g), ("A", career_a), ("Pts", career_pt), ("GP", career_gp)]
         )
