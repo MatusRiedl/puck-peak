@@ -1,0 +1,20 @@
+services:
+  puck-peak:
+    build: .
+    image: puck-peak:latest
+    container_name: puck-peak
+    restart: unless-stopped
+    expose:
+      - "8501"
+    volumes:
+      - nhl_cache:/app/.cache/nhl_api
+    networks:
+      - web
+
+volumes:
+  nhl_cache:
+
+networks:
+  web:
+    external: true
+    name: web

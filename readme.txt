@@ -566,3 +566,50 @@ Key integration notes:
 - age-rarity top-5 names intentionally reuse cached player landing data through `get_player_identity_summary()` instead of scraping a second historical names artifact
 
 That is the architecture. No magic, just disciplined pandas.
+
+SECTION 13 - DEPLOYMENT (DOCKER + HETZNER)
+------------------------------------------
+Production lives at https://puckpeak.com on a Hetzner Cloud VPS (Ubuntu 24.04, Docker CE)
+accessible over SSH as `ssh hetzner` (IP `91.98.195.150`).
+
+Pipeline order:
+`GitHub (main)` -> `git pull on VPS` -> `docker compose up -d --build` -> `puck-peak container (:8501)` -> `Caddy container (:443)` -> user
+
+Repo artifacts (committed):
+- `Dockerfile` - single-stage `python:3.11-slim`; installs `requirements.txt`; runs
+  `streamlit run app.py --server.address=0.0.0.0 --server.port=8501 --server.headless=true`
+- `docker-compose.yml` - single service `puck-peak`, joins external network `web`, no host
+  port publish, named volume `nhl_cache` mounted at `/app/.cache/nhl_api`
+- `.dockerignore` - excludes `.git`, `.cache`, `tests`, `debug`, `docs`, scraper/trainer
+  scripts, and project markdown metadata so those stay out of the image
+
+Server-side layout:
+- `/opt/puck-peak/` - this repo, cloned from GitHub
+- `/opt/caddy/` - standalone Caddy stack (`docker-compose.yml` + `Caddyfile`); terminates
+  TLS and reverse-proxies `puckpeak.com` -> `puck-peak:8501` over the shared `web` network,
+  redirects `www.puckpeak.com` -> apex
+- Docker network `web` is external / shared; created once on the host with
+  `docker network create web`
+
+Caching across restarts:
+- Docker named volume `nhl_cache` persists the `diskcache` directory. `NHLCache` in
+  `nhl/cache.py` keeps its shared disk cache there, so live / seasonal / historical
+  entries survive container rebuilds. `@st.cache_data` process-local wrappers warm
+  themselves from the disk cache after the first rerun.
+
+Deploy workflow (post-initial setup):
+```
+ssh hetzner
+cd /opt/puck-peak
+git pull
+docker compose up -d --build
+docker image prune -f
+```
+
+Rollback: `git revert <commit>` + `docker compose up -d --build`, or
+`docker compose down` to stop entirely. Dropping the cache volume
+(`docker compose down -v`) is optional; the app rewarms on next start.
+
+No secrets, no env-driven config, no CI/CD pipeline. The NHL APIs are public and the
+app is read-only, so the image and the host need no credentials. If that ever changes,
+add a `.env` (git-ignored) and wire it in through `env_file:` in the compose service.

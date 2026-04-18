@@ -117,3 +117,21 @@ win_prob_weights.json    offline-trained logistic-regression weights used at run
 
 Optional:
 - Set `PUCKPEAK_CACHE_WARMER_ENABLED=1` if you want the process-local background cache warmer to run in development or production.
+
+## Deployment (Docker)
+
+Production runs in Docker on a Hetzner VPS at https://puckpeak.com, behind a standalone Caddy reverse proxy that terminates TLS (Let's Encrypt, automatic).
+
+Repo ships with `Dockerfile` and `docker-compose.yml`. The container joins an external Docker network named `web` shared with the Caddy stack; it does not publish any host ports directly. A named volume (`nhl_cache`) persists `.cache/nhl_api/` across restarts so warmed NHL API responses survive rebuilds.
+
+On-server deploy workflow (SSH alias `hetzner`, server-side path `/opt/puck-peak/`):
+
+```
+ssh hetzner
+cd /opt/puck-peak
+git pull
+docker compose up -d --build
+docker image prune -f
+```
+
+GitHub is the source of truth; the server pulls from it. First-time setup (network, Caddy stack, git clone) is covered in `readme.txt` under the Deployment section.
