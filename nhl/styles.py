@@ -1844,6 +1844,75 @@ _CSS = """
                 margin-top: 0.5rem !important;
             }
         }
+
+        /* ── Skeleton loaders (paint-first placeholders) ──────────────── */
+        /* Base shimmer block: grey background overlaid with a sweeping
+           gradient via ::after. Real content swaps in by clearing the
+           hosting st.empty() slot and re-rendering inside it. */
+        .pp-skel-wrap {
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .pp-skel-block {
+            position: relative;
+            overflow: hidden;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+            width: 100%;
+        }
+        .pp-skel-block::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background-image: linear-gradient(
+                90deg,
+                transparent 0%,
+                rgba(255, 255, 255, 0.08) 50%,
+                transparent 100%
+            );
+            transform: translateX(-100%);
+            animation: pp-skel-shimmer 1.4s ease-in-out infinite;
+        }
+        @keyframes pp-skel-shimmer {
+            0%   { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+        /* Per-component sizing — heights tuned to match real content
+           so the swap causes no layout drift. */
+        .pp-skel-chart-toolbar { height: 28px; margin: 0 0 12px 0; max-width: 320px; }
+        .pp-skel-chart         { width: 100%; }
+        .pp-skel-tabs          { display: flex; gap: 8px; margin: 0 0 12px 0; }
+        .pp-skel-pill          { height: 32px; width: 140px; border-radius: 16px; }
+        .pp-skel-grid          { display: flex; flex-direction: column; gap: 10px; }
+        .pp-skel-card          { height: 56px; }
+        .pp-skel-heading       { height: 22px; margin: 0 0 12px 0; max-width: 220px; }
+        .pp-skel-stack         { display: flex; flex-direction: column; gap: 10px; }
+        .pp-skel-game          { height: 64px; }
+
+        /* Lazy-load headshot utility: grey circle visible until the real
+           <img loading="lazy"> decodes and paints on top. No JS. */
+        .pp-skel-headshot-wrap {
+            position: relative;
+            display: inline-block;
+            width: 32px;
+            height: 32px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 50%;
+            overflow: hidden;
+            flex-shrink: 0;
+        }
+        .pp-skel-headshot-wrap > img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 50%;
+            display: block;
+        }
+
+        /* Accessibility: respect prefers-reduced-motion */
+        @media (prefers-reduced-motion: reduce) {
+            .pp-skel-block::after { animation: none; }
+        }
     </style>
 """
 """Full CSS block injected into the Streamlit page head."""

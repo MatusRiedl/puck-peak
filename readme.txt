@@ -54,6 +54,8 @@ and stacked matchup cards. The primary trigger is a small JS bridge mounted thro
 - dispatches to `process_players()` or `process_teams()`
 - renders the chart-column `Chart season` picker, the right-rail predictions area, and the comparison panel
 
+`app.py` runs a three-phase render pass: a paint phase that creates `st.empty()` slots and injects shimmer skeleton HTML from `nhl/skeletons.py` before any pipeline call (so structure paints in under ~100ms during cold-cache loads), a fetch phase that runs `process_players()` / `process_teams()` synchronously, and a mount phase that calls `slot.empty()` and re-renders into the same slot through the `@st.fragment`-wrapped helpers in `nhl/fragments.py`. The fragments exist so post-load widget interactions only rerun the chart, detail tabs, or predictions panel they sit in - they do not own the cold-load lifecycle.
+
 SECTION 2 - FILE STRUCTURE
 --------------------------
 Top level:
@@ -87,6 +89,8 @@ Top level:
 - `dialog.py` - chart click dialogs and matchup-history modal
 - `chart.py` - Plotly render, baseline overlay, share link, native point-click dispatch, and dialog routing
 - `comparison.py` - Overview / Current Standings tabs, the chart-season picker renderer, clickable predictions panel, and live standings board markup
+- `skeletons.py` - static shimmer-skeleton HTML for chart, detail tabs, and predictions; painted before the pipeline so the page is not blank on cold loads
+- `fragments.py` - `@st.fragment` wrappers around `render_chart`, `render_detail_tabs`, and `render_predictions_panel` so post-load widget interactions stay scoped to one panel
 - `ui_state.py` - shared session-state helpers for modal-slot guards
 - `stanley_cup.py` - current-standings / Cup-pick board builder
 - `url_params.py` - compact share-link encode/decode with legacy-link sanitization and canonicalization
@@ -510,7 +514,7 @@ Import shape:
 - runtime/cache layer: `cache`, `api`, `data_loaders`, `schedule`, `baselines`, `cache_warmer`
 - pure processing: `knn_engine`, `player_pipeline`, `team_pipeline`
 - additive preload helper: `async_preloader`
-- UI: `controls`, `sidebar`, `dialog`, `chart`, `comparison`
+- UI: `controls`, `sidebar`, `dialog`, `chart`, `comparison`, `skeletons`, `fragments`
 - `app.py` ties everything together
 
 Module responsibilities:
@@ -533,6 +537,8 @@ Module responsibilities:
 - `dialog.py` now inserts the rarity callout directly under `Career Subtotals` in player age snapshots
 - `chart.py` - figure assembly, baseline overlay, share-link button, Plotly click bridge, and player/team click dispatch
 - `comparison.py` - season-aware Overview / Current Standings tabs, the chart-season picker renderer, JS click bridges (prediction-card and identity-card), clickable predictions panel, and live standings board wrapper
+- `skeletons.py` - HTML generators for the paint-first shimmer placeholders rendered by `app.py` into the chart, detail tabs, and predictions slots before the pipeline runs
+- `fragments.py` - `@st.fragment`-decorated wrappers around `render_chart`, `render_detail_tabs`, and `render_predictions_panel`; called during the mount phase so post-load widget interactions only rerun the affected panel
 - `stanley_cup.py` - standings-board assembly and Cup-pick summarization
 - `url_params.py` - compact share-link encoder/decoder with legacy-link sanitization and canonicalization
 - `schedule.py` - live/recent matchup detection, upcoming games, featured players, matchup history, and runtime pregame win-prob inference

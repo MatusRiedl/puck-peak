@@ -604,8 +604,9 @@ def _render_player_sidebar() -> dict:
                 headshot = get_player_headshot(pid)
                 safe_name = escape(str(name or ""))
                 img_html = (
-                    f"<img src='{headshot}' style='width:32px;height:32px;"
-                    f"border-radius:50%;object-fit:cover;flex-shrink:0;'>"
+                    f"<span class='pp-skel-headshot-wrap'>"
+                    f"<img src='{headshot}' loading='lazy' decoding='async' alt='{safe_name}'>"
+                    f"</span>"
                     if headshot else ""
                 )
                 st.markdown(

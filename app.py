@@ -10,14 +10,13 @@ import streamlit as st
 from nhl.async_preloader import preload_all_categories
 from nhl.baselines import get_historical_baselines, get_team_baselines
 from nhl.cache_warmer import start_background_warmer
-from nhl.chart import render_chart
 from nhl.comparison import (
     _mount_matchup_history_click_bridge,
     has_pending_matchup_history_dialog_request,
     render_chart_season_picker,
-    render_detail_tabs,
-    render_predictions_panel,
 )
+from nhl.fragments import chart_fragment, detail_tabs_fragment, predictions_fragment
+from nhl.skeletons import chart_skeleton, detail_tabs_skeleton, predictions_skeleton
 from nhl.constants import ACTIVE_TEAMS
 from nhl.controls import render_controls
 from nhl.data_loaders import (
@@ -212,23 +211,33 @@ st.markdown("<div id='main-chart-layout'></div>", unsafe_allow_html=True)
 
 col_chart, col_stats = st.columns([62, 38], gap="medium")
 
-# Define visual slots inside col_chart in top-to-bottom DOM order.
-# sub_col2 is filled immediately so render_controls() runs early (before pipeline).
+# =============================================================================
+# Paint phase — create st.empty() slots and inject shimmer skeletons BEFORE
+# any pipeline call. Streamlit streams these deltas to the browser
+# immediately, so the user sees page structure within ~100ms instead of a
+# blank page during cold-cache loads. Real content is mounted into the same
+# slots after the pipeline runs (mount phase, below).
+# =============================================================================
 with col_chart:
-    chart_placeholder = st.container()
+    chart_slot = st.empty()
     sub_col1, sub_col2 = st.columns([1.96, 2])
-    detail_placeholder = st.container()
+    detail_slot = st.empty()
 
 with col_stats:
     st.markdown("<div id='comparison-right-rail'></div>", unsafe_allow_html=True)
-    predictions_slot = st.container()
+    predictions_slot = st.empty()
+    bridge_slot = st.empty()  # invisible mount point for the matchup-history bridge
+
+chart_slot.html(chart_skeleton())
+detail_slot.html(detail_tabs_skeleton())
+predictions_slot.html(predictions_skeleton())
 
 # Must run before pipeline — produces metric and do_cumul.
 with sub_col2:
     st.markdown("<div id='comparison-controls-panel'></div>", unsafe_allow_html=True)
     metric, do_cumul = render_controls()
 
-with predictions_slot:
+with bridge_slot.container():
     # Mount the matchup-history bridge before the chart. The returned payload
     # may be None even when the component is already mounted, so the panel gets
     # an explicit mounted flag later to avoid double-mounting the same key.
@@ -356,8 +365,15 @@ elif active_players:
 with sub_col1:
     render_chart_season_picker(chart_season_options)
 
-with chart_placeholder:
-    render_chart(
+# =============================================================================
+# Mount phase — pipeline has resolved, swap skeletons for real content.
+# Each panel is wrapped in an @st.fragment so post-load widget interactions
+# (toggles, season picker) only rerun that scoped block instead of the whole
+# app; skeletons never reappear after the initial paint→fetch→mount pass.
+# =============================================================================
+chart_slot.empty()
+with chart_slot.container():
+    chart_fragment(
         processed_dfs        = processed_dfs,
         metric               = metric,
         team_mode            = team_mode,
@@ -380,9 +396,10 @@ with chart_placeholder:
         suppress_dialogs     = has_pending_matchup_history_dialog_request(matchup_history_trigger_value),
     )
 
-with detail_placeholder:
+detail_slot.empty()
+with detail_slot.container():
     st.markdown("<div id='comparison-detail-layout'></div>", unsafe_allow_html=True)
-    render_detail_tabs(
+    detail_tabs_fragment(
         processed_dfs   = processed_dfs,
         players         = active_players,
         teams           = st.session_state.teams,
@@ -395,8 +412,9 @@ with detail_placeholder:
         do_cumul        = do_cumul,
     )
 
-with predictions_slot:
-    render_predictions_panel(
+predictions_slot.empty()
+with predictions_slot.container():
+    predictions_fragment(
         share_params=share_params,
         matchup_history_trigger_value=matchup_history_trigger_value,
         matchup_history_bridge_mounted=True,
@@ -409,7 +427,7 @@ st.markdown("---")
 # Keep this visible version synced with the newest changelog entry
 st.markdown(
     "<p style='text-align:center;color:gray;font-size:14px;'>"
-    "Created by Iksperial. v1.00.5 -- 11,282 lines of Python<br>"
+    "Created by Iksperial. v1.00.6 -- 11,331 lines of Python<br>"
     "<em>Data is the only religion that strictly punishes you for ignoring it.</em>"
     "</p>",
     unsafe_allow_html=True,

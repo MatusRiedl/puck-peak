@@ -46,7 +46,9 @@ https://nhl-age-curves.streamlit.app/
 
 * **Mobile Friendly Layout:** Controls are organized into collapsible expander sections so the chart stays front-and-center on smaller screens.
 
-* **Player Headshots:** Each active roster entry in the sidebar shows the player's circular headshot thumbnail pulled from the NHL API.
+* **Player Headshots:** Each active roster entry in the sidebar shows the player's circular headshot thumbnail pulled from the NHL API. Headshots use native `loading="lazy"` inside a shimmer wrapper so a grey circle paints instantly while the image decodes.
+
+* **Paint-First Skeleton Loaders:** The chart, detail tabs, and predictions panel paint shimmer placeholders before the pipeline runs, then swap to real content in place once data lands. Post-load widget interactions are scoped through `@st.fragment` so toggling chart options never reflashes the skeletons.
 
 ## Tech Stack
 * **Frontend/Framework:** Streamlit
@@ -93,6 +95,8 @@ nhl/
     dialog.py            season-detail and matchup-history dialogs
     chart.py             Plotly chart rendering, share link, JS pan-clamp, and chart click bridge
     comparison.py        Overview/Current Standings detail tabs, chart-season picker helper, clickable predictions panel, and live standings wrapper
+    skeletons.py         static shimmer-skeleton HTML generators painted before the pipeline runs
+    fragments.py         @st.fragment wrappers around the chart, detail tabs, and predictions panel so post-load widget reruns stay scoped
     ui_state.py          shared Streamlit session-state guards for modal orchestration
     stanley_cup.py       standings-board and Cup-pick builder
     url_params.py        URL query param encode/decode for shareable links and chart season state
@@ -120,13 +124,45 @@ Optional:
 
 ## Deployment (Docker)
 
-Production runs in Docker on a Hetzner VPS at https://puckpeak.com, behind a standalone Caddy reverse proxy that terminates TLS (Let's Encrypt, automatic).
+Production runs in Docker on a Hetzner Cloud VPS (`ssh hetzner`, `91.98.195.150`) serving https://puckpeak.com. A standalone Caddy container terminates TLS using automatic Let's Encrypt certificates and reverse-proxies to the Streamlit container over an internal Docker network. The app never publishes any host port directly.
 
-Repo ships with `Dockerfile` and `docker-compose.yml`. The container joins an external Docker network named `web` shared with the Caddy stack; it does not publish any host ports directly. A named volume (`nhl_cache`) persists `.cache/nhl_api/` across restarts so warmed NHL API responses survive rebuilds.
-
-On-server deploy workflow (SSH alias `hetzner`, server-side path `/opt/puck-peak/`):
+### Server layout
 
 ```
+/opt/puck-peak/              this repo, cloned from GitHub; owns docker-compose.yml + Dockerfile
+/opt/caddy/                  standalone Caddy stack; owns docker-compose.yml + Caddyfile
+docker network "web"         external, shared; both stacks join it so Caddy can reach puck-peak:8501
+volume "puck-peak_nhl_cache" persists /app/.cache/nhl_api across container rebuilds
+```
+
+`/opt/caddy/Caddyfile`:
+```
+puckpeak.com {
+    reverse_proxy puck-peak:8501
+}
+
+www.puckpeak.com {
+    redir https://puckpeak.com{uri} permanent
+}
+```
+
+### First-time setup (already done — keep as reference for rebuilds or a second server)
+
+```bash
+ssh hetzner
+docker network create web
+cd /opt
+git clone https://github.com/MatusRiedl/puck-peak.git
+# write /opt/caddy/docker-compose.yml and /opt/caddy/Caddyfile (see readme.txt Section 13)
+cd /opt/puck-peak && docker compose up -d --build
+cd /opt/caddy     && docker compose up -d
+```
+
+No firewall rules needed (ufw inactive; Hetzner Cloud firewall opens 22/80/443 at the edge). No env vars or secrets — the NHL APIs are public and the app has no auth.
+
+### Redeploy (after pushing a new commit to `main`)
+
+```bash
 ssh hetzner
 cd /opt/puck-peak
 git pull
@@ -134,4 +170,37 @@ docker compose up -d --build
 docker image prune -f
 ```
 
-GitHub is the source of truth; the server pulls from it. First-time setup (network, Caddy stack, git clone) is covered in `readme.txt` under the Deployment section.
+Cache volume survives this. To wipe the NHL API disk cache as well, `docker compose down -v` then bring it back up.
+
+### Private repository (deploy key)
+
+The server currently clones over unauthenticated HTTPS — fine while the repo is public. If you make the GitHub repo private, switch the server to a read-only SSH deploy key so `git pull` keeps working without putting your personal credentials on the VPS:
+
+```bash
+# on the server
+ssh-keygen -t ed25519 -C "puckpeak-deploy@hetzner" -f ~/.ssh/puckpeak_deploy -N ""
+cat ~/.ssh/puckpeak_deploy.pub
+# copy that line into GitHub -> repo Settings -> Deploy keys -> Add deploy key
+# (leave "Allow write access" unchecked — server only needs to read)
+
+cat >> ~/.ssh/config <<'EOF'
+Host github-puckpeak
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/puckpeak_deploy
+    IdentitiesOnly yes
+EOF
+
+cd /opt/puck-peak
+git remote set-url origin git@github-puckpeak:MatusRiedl/puck-peak.git
+git pull   # should still work, now over SSH with the deploy key
+```
+
+The deploy key is scoped to this one repo and read-only, so even if the VPS is compromised the attacker can't push malicious commits back to GitHub. Your laptop keeps pushing to GitHub as normal with your personal key — nothing changes on the dev side.
+
+### Rollback
+
+- Bad commit: `git revert <sha> && git push && ssh hetzner 'cd /opt/puck-peak && git pull && docker compose up -d --build'`
+- Stop the app entirely: `ssh hetzner 'cd /opt/puck-peak && docker compose down'` (Caddy keeps running; it'll just 502 until puck-peak is back)
+
+Detailed architecture and operational notes live in `readme.txt` (Section 13 — Deployment).
