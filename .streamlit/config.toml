@@ -8,8 +8,11 @@ showErrorDetails = "none"
 [server]
 # No hot-reload in a container; the watchdog observer on /app is pure overhead.
 fileWatcherType = "none"
-# Compress the delta stream. Every rerun ships ~75 KB of CSS plus the Plotly figure.
-enableWebsocketCompression = true
+# NOTE: enableWebsocketCompression was set here and removed again. It was never tested
+# through the Caddy reverse proxy, where permessage-deflate negotiated with context
+# takeover on both sides. Do not re-enable it without verifying a long session through
+# the real proxy first — the ~75 KB of CSS per rerun is better solved by not re-sending
+# the stylesheet than by compressing the stream.
 
 [theme]
 base                     = "dark"

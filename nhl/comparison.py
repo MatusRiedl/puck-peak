@@ -107,13 +107,7 @@ _MATCHUP_HISTORY_CLICK_BRIDGE_JS = """
 export default function(component) {
     const { setTriggerValue } = component;
 
-    const onClick = (event) => {
-        const target = event.target;
-        if (!(target instanceof Element)) {
-            return;
-        }
-
-        const link = target.closest('.live-game-card-link[data-nhl-matchup-history="1"]');
+    const emitTrigger = (link, event) => {
         if (!link) {
             return;
         }
@@ -123,17 +117,45 @@ export default function(component) {
             return;
         }
 
-        event.preventDefault();
-        event.stopPropagation();
+        if (event) {
+            event.preventDefault();
+            event.stopPropagation();
+        }
 
         const nonce = `${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
         setTriggerValue('clicked', `${matchup}|${nonce}`);
     };
 
+    const getCardLink = (target) => {
+        if (!(target instanceof Element)) {
+            return null;
+        }
+        return target.closest('.live-game-card-link[data-nhl-matchup-history="1"]');
+    };
+
+    const onClick = (event) => {
+        emitTrigger(getCardLink(event.target), event);
+    };
+
+    // The card overlay carries no href, so keyboard users need an explicit
+    // activation path. Mirrors the identity-card bridge below.
+    const onKeyDown = (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') {
+            return;
+        }
+        const link = getCardLink(event.target);
+        if (!link) {
+            return;
+        }
+        emitTrigger(link, event);
+    };
+
     document.addEventListener('click', onClick, true);
+    document.addEventListener('keydown', onKeyDown, true);
 
     return () => {
         document.removeEventListener('click', onClick, true);
+        document.removeEventListener('keydown', onKeyDown, true);
     };
 }
 """
@@ -1123,12 +1145,16 @@ def _show_identity_card_from_trigger(value) -> bool:
         return False
 
     entity_kind, entity_value, nonce = parsed_trigger
+
+    # Gate check BEFORE writing the nonce — a blocked click must stay unhandled so it
+    # can be retried, otherwise the click is destroyed. Unlike the matchup path there
+    # is no pending-request fallback here to recover it.
+    if not dialog_slot_available():
+        return False
+
     if session_state_get(_LAST_IDENTITY_CARD_TRIGGER_NONCE_SESSION_KEY) == nonce:
         return False
     session_state_set(_LAST_IDENTITY_CARD_TRIGGER_NONCE_SESSION_KEY, nonce)
-
-    if not dialog_slot_available():
-        return False
 
     if entity_kind == "player":
         show_player_identity_details(int(entity_value))
@@ -1366,7 +1392,21 @@ def _build_live_game_card_html(game: dict) -> str:
 
 
 def _build_live_game_card_href(game: dict, share_params: dict | None = None) -> str:
-    """Build one self-link that preserves current shared app state."""
+    """Build the shareable deep link for one matchup.
+
+    No longer used as the card's own `href`: the overlay covers the entire card, so
+    any click the JS bridge missed followed this link as a real document navigation,
+    tearing down the websocket and starting a fresh session — the "clicking a
+    prediction card re-renders the whole page" bug. The `?mh=` query path itself still
+    works for pasted or shared URLs, which is what this builder is for.
+
+    Args:
+        game: Normalized upcoming-game dict.
+        share_params: Current app state to preserve in the link.
+
+    Returns:
+        A relative `?…&mh=AWY,HOME` URL, or ``"#"`` when the matchup is incomplete.
+    """
     away_abbr = str(game.get("away_abbr", "") or "").strip().upper()
     home_abbr = str(game.get("home_abbr", "") or "").strip().upper()
     if not away_abbr or not home_abbr:
@@ -1388,12 +1428,15 @@ def _build_live_game_card_link_html(game: dict, share_params: dict | None = None
     home_abbr = str(game.get("home_abbr", "") or "").strip().upper()
     away_name = str(game.get("away_name", "") or game.get("away_abbr", "") or "").strip()
     home_name = str(game.get("home_name", "") or game.get("home_abbr", "") or "").strip()
-    href = escape(_build_live_game_card_href(game, share_params=share_params), quote=True)
     title = escape(f"Open matchup history for {away_name} at {home_name}", quote=True)
     matchup_value = escape(f"{away_abbr},{home_abbr}", quote=True)
+    # Deliberately no href: the overlay spans the whole card, so a click the bridge
+    # missed used to navigate the document and restart the session. role/tabindex keep
+    # it focusable and announced; the bridge handles Enter and Space.
     return (
         "<div class='live-game-card-shell'>"
-        f"<a class='live-game-card-link' href='{href}' aria-label='{title}' title='{title}' "
+        f"<a class='live-game-card-link' role='button' tabindex='0' "
+        f"aria-label='{title}' title='{title}' "
         "data-nhl-matchup-history='1' "
         f"data-matchup-history='{matchup_value}'></a>"
         f"{_build_live_game_card_html(game)}"

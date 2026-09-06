@@ -11,7 +11,6 @@ from nhl.async_preloader import preload_all_categories
 from nhl.baselines import get_historical_baselines, get_team_baselines
 from nhl.cache_warmer import start_background_warmer
 from nhl.comparison import (
-    _mount_matchup_history_click_bridge,
     has_pending_matchup_history_dialog_request,
     render_chart_season_picker,
 )
@@ -31,6 +30,7 @@ from nhl.player_pipeline import process_players
 from nhl.sidebar import render_sidebar
 from nhl.styles import get_favicon_path, inject_css, inject_header_bb_logo, inject_mobile_dropdown_fix
 from nhl.team_pipeline import process_teams
+from nhl.ui_state import begin_script_run
 from nhl.schedule import get_featured_players, get_live_or_recent_game
 from nhl.url_params import (
     _resolve_shared_player_names as _canonicalize_shared_player_names,
@@ -133,7 +133,7 @@ if '_pre_season_league_filter' not in st.session_state:
     st.session_state._pre_season_league_filter = None
 if '_pre_season_do_era' not in st.session_state:
     st.session_state._pre_season_do_era = None
-st.session_state["_dialog_opened_this_run"] = False
+begin_script_run()
 
 if st.session_state.stat_category not in {"Skater", "Goalie", "Team"}:
     st.session_state.stat_category = "Skater"
@@ -228,18 +228,17 @@ with col_chart:
 with col_stats:
     st.markdown("<div id='comparison-right-rail'></div>", unsafe_allow_html=True)
     predictions_slot = st.empty()
-    bridge_slot = st.empty()  # invisible mount point for the matchup-history bridge
 
 # Must run before pipeline — produces metric and do_cumul.
 with sub_col2:
     st.markdown("<div id='comparison-controls-panel'></div>", unsafe_allow_html=True)
     metric, do_cumul = render_controls()
 
-with bridge_slot.container():
-    # Mount the matchup-history bridge before the chart. The returned payload
-    # may be None even when the component is already mounted, so the panel gets
-    # an explicit mounted flag later to avoid double-mounting the same key.
-    matchup_history_trigger_value = _mount_matchup_history_click_bridge()
+# The matchup-history click bridge is deliberately NOT mounted here. Mounted at
+# top-level script scope it belonged to the main run, so every prediction-card click
+# forced a full script rerun — the only click on the page that did — while the chart
+# and identity bridges were fragment-scoped. It now mounts inside
+# predictions_fragment, so its trigger reruns only the right rail.
 
 # =============================================================================
 # Sidebar — renders player/team board and returns keys for chart cache-busting.
@@ -389,7 +388,12 @@ with chart_slot.container():
         do_era               = st.session_state.do_era,
         selected_season      = st.session_state.chart_season,
         share_params         = share_params,
-        suppress_dialogs     = has_pending_matchup_history_dialog_request(matchup_history_trigger_value),
+        # No live trigger value to pass now that the bridge mounts inside the
+        # predictions fragment. Session state and the ?mh= query param still cover the
+        # only case that matters here: a full run where the chart and the matchup
+        # dialog could both fire. A bridge click now reruns just the right rail, so the
+        # chart is not rendering at that moment and cannot conflict.
+        suppress_dialogs     = has_pending_matchup_history_dialog_request(),
     )
 
 with detail_slot.container():
@@ -408,11 +412,9 @@ with detail_slot.container():
     )
 
 with predictions_slot.container():
-    predictions_fragment(
-        share_params=share_params,
-        matchup_history_trigger_value=matchup_history_trigger_value,
-        matchup_history_bridge_mounted=True,
-    )
+    # matchup_history_bridge_mounted defaults to False, so the panel mounts the bridge
+    # itself inside this fragment scope.
+    predictions_fragment(share_params=share_params)
 
 # =============================================================================
 # Footer
@@ -421,7 +423,7 @@ st.markdown("---")
 # Keep this visible version synced with the newest changelog entry
 st.markdown(
     "<p style='text-align:center;color:gray;font-size:14px;'>"
-    "Created by Iksperial. v1.01.2 -- 11,458 lines of Python<br>"
+    "Created by Iksperial. v1.01.3 -- 11,483 lines of Python<br>"
     "<em>Data is the only religion that strictly punishes you for ignoring it.</em>"
     "</p>",
     unsafe_allow_html=True,

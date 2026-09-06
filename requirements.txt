@@ -1,9 +1,20 @@
+# Fully pinned on purpose. `docker compose build` resolves fresh wheels every time, so
+# an unpinned entry means production runs versions that were never tested locally.
+# That is exactly how plotly 7.0.0 reached production while 6.5.2 was tested.
 streamlit==1.54.0
-pandas
-requests
-plotly
-fastparquet
-pyarrow
-psutil
-scikit-learn
-diskcache
+
+# plotly must stay on the 6.x line for streamlit 1.54.0. Streamlit renders
+# st.plotly_chart with its OWN bundled plotly.js (3.3.1 for this release, in
+# streamlit/static/static/js/), and only serializes the figure on the Python side.
+# plotly 6.5.2 targets plotly.js 3.3.1; plotly 7.x targets 4.0.0 and regenerates its
+# validators and color handling against that schema. Before bumping this, check
+# `plotly.offline.get_plotlyjs_version()` against the version in Streamlit's bundle.
+plotly==6.5.2
+
+pandas==2.3.3
+requests==2.32.5
+fastparquet==2025.12.0
+pyarrow==23.0.1
+psutil==7.2.2
+scikit-learn==1.8.0
+diskcache==5.6.3

@@ -857,10 +857,23 @@ def _show_chart_dialog_from_trigger(
     nonce = parsed_trigger["nonce"]
     if session_state_get(LAST_HANDLED_CHART_CLICK_NONCE_SESSION_KEY) == nonce:
         return False
-    session_state_set(LAST_HANDLED_CHART_CLICK_NONCE_SESSION_KEY, nonce)
 
-    if suppress_dialogs or not dialog_slot_available():
+    # The two gates below are deliberately NOT treated the same way.
+    #
+    # suppress_dialogs is arbitration: a matchup-history dialog is taking this run on
+    # purpose, so the chart click is dropped for good. The bridge's trigger value
+    # survives across reruns, so leaving the nonce unburned here would pop the chart
+    # dialog open on the next rerun, seemingly out of nowhere.
+    if suppress_dialogs:
+        session_state_set(LAST_HANDLED_CHART_CLICK_NONCE_SESSION_KEY, nonce)
         return False
+
+    # A busy dialog slot is transient. Burning the nonce here destroyed the click
+    # permanently, which is what made clicks stop working once the slot latched.
+    if not dialog_slot_available():
+        return False
+
+    session_state_set(LAST_HANDLED_CHART_CLICK_NONCE_SESSION_KEY, nonce)
 
     # The JS bridge emits one normalized point payload; Python keeps dialog routing centralized here.
     return _dispatch_chart_click_point(
@@ -2340,8 +2353,27 @@ def render_chart(
             syncToolbarTitleOffset(plot, window.parent);
         }});
 
-        // Clamp pan/zoom to data region and update dtick on zoom
+        // Clamp pan/zoom to data region and update dtick on zoom.
+        // Bind once per plot div: this script re-runs on every iframe (re)load while
+        // the plot div itself survives across reruns (stable chart key), so an
+        // unguarded bind stacked a new listener on every dialog open/close until the
+        // chart crawled. Same guard style as patchHoverLabelRects below.
+        if (plot.__nhlRelayoutClampBound) {{ return; }}
+        plot.__nhlRelayoutClampBound = true;
+
+        // _updating must be cleared in the relayout promise, not on the same tick:
+        // Plotly.relayout is async, so a synchronous reset left the guard already
+        // false by the time the resulting plotly_relayout event fired.
         var _updating = false;
+        function guardedRelayout(target, patch) {{
+            _updating = true;
+            var done = function() {{ _updating = false; }};
+            try {{
+                var res = Plotly.relayout(target, patch);
+                if (res && typeof res.then === 'function') {{ res.then(done, done); }}
+                else {{ done(); }}
+            }} catch (e) {{ done(); }}
+        }}
         plot.on('plotly_relayout', function(evt) {{
             if (_updating) return;
 
@@ -2354,7 +2386,7 @@ def render_chart(
             if (r1 !== undefined && r1 > X_MAX) {{ clamps['xaxis.range[1]'] = X_MAX; needsClamp = true; }}
             if (y0 !== undefined && y0 < Y_MIN) {{ clamps['yaxis.range[0]'] = Y_MIN; needsClamp = true; }}
             if (y1 !== undefined && y1 > Y_MAX) {{ clamps['yaxis.range[1]'] = Y_MAX; needsClamp = true; }}
-            if (needsClamp) {{ _updating = true; Plotly.relayout(plot, clamps); _updating = false; }}
+            if (needsClamp) {{ guardedRelayout(plot, clamps); }}
 
             // For season year mode, update dtick based on current visible range
             // Handle both zoom (r0 or r1 defined) and double-click reset (both undefined)
@@ -2366,9 +2398,7 @@ def render_chart(
                     var newDtick = calcDtick(width, currentRange);
                     // Only update if dtick actually changed
                     if (plot.layout && plot.layout.xaxis && plot.layout.xaxis.dtick !== newDtick) {{
-                        _updating = true;
-                        Plotly.relayout(plot, {{'xaxis.dtick': newDtick}});
-                        _updating = false;
+                        guardedRelayout(plot, {{'xaxis.dtick': newDtick}});
                     }}
                 }}
             }}
@@ -2651,6 +2681,12 @@ def render_chart(
                 bindPlayerTraceToggleButtons(parent, Plotly);
             }});
         }}
+
+        // Bind the resize handler once per parent window. It is attached to the
+        // long-lived parent, not the iframe, so it outlives every teardown — an
+        // unguarded bind accumulated one handler per rerun forever.
+        if (parent.__nhlChartResizeBound) {{ return; }}
+        parent.__nhlChartResizeBound = true;
 
         parent.addEventListener('resize', function() {{
             parent.document.querySelectorAll('.js-plotly-plot').forEach(function(p) {{

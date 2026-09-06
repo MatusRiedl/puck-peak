@@ -7,9 +7,11 @@ from unittest.mock import patch
 import pandas as pd
 
 import nhl.comparison as comparison_module
+from nhl import ui_state
 from nhl.comparison import (
     _build_card_stat_row,
     _build_live_game_card_html,
+    _build_live_game_card_href,
     _build_live_game_card_link_html,
     _prime_chart_season_picker,
     _sync_chart_season_picker,
@@ -85,8 +87,14 @@ class ComparisonTests(unittest.TestCase):
         self.assertIn("Estimate available once both teams have played a few games.", html)
         self.assertIn("live-game-card--no-prob", html)
 
-    def test_live_game_card_link_html_preserves_shared_params_and_adds_matchup_history_query(self):
-        """Wrap each prediction card in a full-card self-link for matchup history."""
+    def test_live_game_card_link_html_is_a_non_navigating_overlay(self):
+        """The card overlay must carry no href, only bridge hooks.
+
+        The overlay spans the entire card, so any click the JS bridge missed used to
+        follow the href as a real document navigation — tearing down the websocket and
+        restarting the session, which is what made a prediction-card click re-render
+        the whole page. It is now a focusable button-role element with no href.
+        """
         html = _build_live_game_card_link_html(
             {
                 "away_abbr": "DET",
@@ -103,9 +111,25 @@ class ComparisonTests(unittest.TestCase):
         self.assertIn("live-game-card-link", html)
         self.assertIn("data-nhl-matchup-history='1'", html)
         self.assertIn("data-matchup-history='DET,TOR'", html)
-        self.assertIn("cat=T", html)
-        self.assertIn("tm=DET%3BTOR", html)
-        self.assertIn("mh=DET%2CTOR", html)
+
+        # No navigation target of any kind.
+        self.assertNotIn("href", html)
+        self.assertNotIn("mh=DET%2CTOR", html)
+
+        # Still reachable by keyboard and announced as an activatable control.
+        self.assertIn("role='button'", html)
+        self.assertIn("tabindex='0'", html)
+
+    def test_live_game_card_href_builder_still_produces_a_share_link(self):
+        """The ?mh= deep link is retained for shared/pasted URLs, just not on the card."""
+        href = _build_live_game_card_href(
+            {"away_abbr": "DET", "home_abbr": "TOR"},
+            share_params={"cat": "T", "tm": "DET;TOR"},
+        )
+
+        self.assertIn("cat=T", href)
+        self.assertIn("tm=DET%3BTOR", href)
+        self.assertIn("mh=DET%2CTOR", href)
 
     def test_predictions_panel_renders_heading_anchor_and_shared_renderer(self):
         """Keep the predictions UI on the dedicated right-rail panel shell."""
@@ -279,7 +303,9 @@ class ComparisonTests(unittest.TestCase):
         ):
             first = comparison_module._show_matchup_history_from_trigger("EDM,DAL|12345")
             duplicate = comparison_module._show_matchup_history_from_trigger("EDM,DAL|12345")
-            session_state["_dialog_opened_this_run"] = False
+            # Represent the start of a new run through the real helper rather than
+            # poking the key: the raw reset is what hid the fragment-rerun bug.
+            ui_state.begin_script_run()
             second = comparison_module._show_matchup_history_from_trigger("EDM,DAL|67890")
 
         self.assertTrue(first)
@@ -391,7 +417,9 @@ class ComparisonTests(unittest.TestCase):
         ):
             first = comparison_module._show_identity_card_from_trigger("player:8478402|12345")
             duplicate = comparison_module._show_identity_card_from_trigger("player:8478402|12345")
-            session_state["_dialog_opened_this_run"] = False
+            # Represent the start of a new run through the real helper rather than
+            # poking the key: the raw reset is what hid the fragment-rerun bug.
+            ui_state.begin_script_run()
             second = comparison_module._show_identity_card_from_trigger("team:EDM|67890")
 
         self.assertTrue(first)

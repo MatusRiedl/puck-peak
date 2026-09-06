@@ -15,6 +15,7 @@ import streamlit as st
 
 from nhl.chart import render_chart
 from nhl.comparison import render_detail_tabs, render_predictions_panel
+from nhl.ui_state import begin_dialog_run
 
 
 @st.fragment
@@ -24,6 +25,7 @@ def chart_fragment(**kwargs) -> None:
     Args:
         **kwargs: Forwarded verbatim to `nhl.chart.render_chart`.
     """
+    begin_dialog_run("chart")
     render_chart(**kwargs)
 
 
@@ -34,6 +36,7 @@ def detail_tabs_fragment(**kwargs) -> None:
     Args:
         **kwargs: Forwarded verbatim to `nhl.comparison.render_detail_tabs`.
     """
+    begin_dialog_run("detail_tabs")
     render_detail_tabs(**kwargs)
 
 
@@ -44,4 +47,5 @@ def predictions_fragment(**kwargs) -> None:
     Args:
         **kwargs: Forwarded verbatim to `nhl.comparison.render_predictions_panel`.
     """
+    begin_dialog_run("predictions")
     render_predictions_panel(**kwargs)
