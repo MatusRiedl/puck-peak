@@ -1507,6 +1507,56 @@ def show_team_identity_details(team_abbr: str) -> None:
         st.info("Team details unavailable right now.")
 
 
+def _build_matchup_history_summary(
+    away_abbr: str,
+    home_abbr: str,
+    history_games: list[dict] | None,
+) -> dict:
+    """Tally head-to-head wins and ties across a list of completed meetings.
+
+    Each team is credited whether it appeared as the home or the away side in a
+    given meeting, so the counts reflect the franchise rather than the venue.
+
+    Args:
+        away_abbr: Away team abbreviation for the upcoming matchup.
+        home_abbr: Home team abbreviation for the upcoming matchup.
+        history_games: Completed meetings, each with away/home abbrevs and scores.
+
+    Returns:
+        Dict with `away_wins`, `home_wins`, `ties`, and `total` integer counts.
+        Meetings with missing or unparseable scores are skipped.
+    """
+    clean_away_abbr = str(away_abbr or "").strip().upper()
+    clean_home_abbr = str(home_abbr or "").strip().upper()
+
+    away_wins = home_wins = ties = 0
+    for game in (history_games or []):
+        try:
+            a, h = int(game.get("away_score")), int(game.get("home_score"))
+        except (TypeError, ValueError):
+            continue
+
+        if a > h:
+            winner = str(game.get("away_abbr", "") or "").strip().upper()
+        elif h > a:
+            winner = str(game.get("home_abbr", "") or "").strip().upper()
+        else:
+            ties += 1
+            continue
+
+        if winner == clean_away_abbr:
+            away_wins += 1
+        elif winner == clean_home_abbr:
+            home_wins += 1
+
+    return {
+        "away_wins": away_wins,
+        "home_wins": home_wins,
+        "ties": ties,
+        "total": away_wins + home_wins + ties,
+    }
+
+
 @st.dialog("Matchup History")
 def show_matchup_history(
     away_abbr: str,
@@ -1528,28 +1578,14 @@ def show_matchup_history(
         history_games = sorted(history_games, key=_matchup_history_sort_key, reverse=True)
 
     # Tally wins for the header sub-block.
-    away_wins = home_wins = ties = 0
-    for game in (history_games or []):
-        away_score = game.get("away_score")
-        home_score = game.get("home_score")
-        try:
-            a, h = int(away_score), int(home_score)
-        except Exception:
-            continue
-        if a > h:
-            if str(game.get("away_abbr", "") or "").strip().upper() == clean_away_abbr:
-                away_wins += 1
-            elif str(game.get("away_abbr", "") or "").strip().upper() == clean_home_abbr:
-                home_wins += 1
-        elif h > a:
-            if str(game.get("home_abbr", "") or "").strip().upper() == clean_away_abbr:
-                away_wins += 1
-            elif str(game.get("home_abbr", "") or "").strip().upper() == clean_home_abbr:
-                home_wins += 1
-        else:
-            ties += 1
+    summary = _build_matchup_history_summary(
+        clean_away_abbr, clean_home_abbr, history_games
+    )
+    away_wins = summary["away_wins"]
+    home_wins = summary["home_wins"]
+    ties = summary["ties"]
+    total = summary["total"]
 
-    total = away_wins + home_wins + ties
     if total > 0:
         ties_line = (
             f"<br><span style='color:#8b949e;'>{ties} tie{'s' if ties != 1 else ''}</span>"

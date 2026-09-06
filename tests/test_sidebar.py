@@ -76,23 +76,34 @@ class SidebarTests(unittest.TestCase):
         self.assertIn("faq-btn-anchor", styles_text)
         self.assertIn("rgba(43, 113, 199, 0.16)", styles_text)
 
-    def test_sidebar_renders_brand_logo_above_the_faq_button(self):
-        """Keep the sidebar logo above the FAQ button without extra legacy title text."""
+    def test_brand_logo_is_injected_into_the_header_not_the_sidebar(self):
+        """The brand logo lives in the Streamlit header bar, not in sidebar markup.
+
+        This previously asserted that `sidebar.py` imported `get_header_logo_data_uri`
+        and emitted a `.sidebar-brand__image` above the FAQ button. That design is
+        gone: the logo is now painted as a `[data-testid="stHeader"]::after`
+        pseudo-element by `inject_header_bb_logo()`, called once from `app.py`.
+        """
         repo_root = Path(__file__).resolve().parents[1]
         sidebar_text = (repo_root / "nhl" / "sidebar.py").read_text(encoding="utf-8")
         styles_text = (repo_root / "nhl" / "styles.py").read_text(encoding="utf-8")
+        app_text = (repo_root / "app.py").read_text(encoding="utf-8")
 
-        self.assertIn("from nhl.styles import get_header_logo_data_uri", sidebar_text)
-        self.assertIn("class='sidebar-brand__image'", sidebar_text)
-        self.assertIn("get_header_logo_data_uri()", sidebar_text)
+        # app.py wires the header logo, after page config so the header exists.
+        self.assertIn("inject_header_bb_logo", app_text)
         self.assertLess(
-            sidebar_text.index("class='sidebar-brand__image'"),
-            sidebar_text.index('st.markdown("<div class=\'faq-btn-anchor\'></div>", unsafe_allow_html=True)'),
+            app_text.index("st.set_page_config("),
+            app_text.index("inject_header_bb_logo()"),
         )
-        self.assertIn(".sidebar-brand", styles_text)
-        self.assertIn(".sidebar-brand__image", styles_text)
+        self.assertIn('[data-testid="stHeader"]::after', styles_text)
+
+        # The sidebar no longer renders the brand itself, nor the legacy title text.
+        self.assertNotIn("get_header_logo_data_uri()", sidebar_text)
         self.assertNotIn("class='sidebar-brand__title'", sidebar_text)
         self.assertNotIn("class='sidebar-brand__subtitle'", sidebar_text)
+
+        # The FAQ anchor is still the first thing the sidebar emits.
+        self.assertIn("faq-btn-anchor", sidebar_text)
 
     def test_app_injects_base_css_after_page_config(self):
         """Keep base CSS injection wired immediately after page config."""

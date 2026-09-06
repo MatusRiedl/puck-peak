@@ -32,9 +32,13 @@ class AppSourceTests(unittest.TestCase):
         self.assertIn("has_pending_matchup_history_dialog_request", app_text)
         self.assertIn("_mount_matchup_history_click_bridge", app_text)
 
+        # app.py mounts the panels through the @st.fragment wrappers in nhl/fragments.py,
+        # so search for those names. The old test looked for "render_chart(" and
+        # "render_predictions_panel(": the first only ever matched inside
+        # "render_chart_season_picker(", and the second appears nowhere in app.py at all.
         mount_idx = app_text.index("matchup_history_trigger_value = _mount_matchup_history_click_bridge()")
-        chart_idx = app_text.index("render_chart(")
-        predictions_idx = app_text.index("render_predictions_panel(")
+        chart_idx = app_text.index("chart_fragment(")
+        predictions_idx = app_text.index("predictions_fragment(")
 
         self.assertLess(mount_idx, chart_idx)
         self.assertIn("suppress_dialogs", app_text[chart_idx: chart_idx + 1200])

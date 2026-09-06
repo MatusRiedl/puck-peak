@@ -2,7 +2,8 @@ import requests
 import pandas as pd
 import concurrent.futures
 import time
-from datetime import datetime
+
+from nhl.constants import current_season_year
 
 SKATER_RECORDS_URL  = "https://records.nhl.com/site/api/skater-career-scoring-regular-season"
 GOALIE_RECORDS_URL  = "https://records.nhl.com/site/api/goalie-career-stats"
@@ -153,9 +154,18 @@ def _toi_to_minutes(toi_str: str) -> float:
 
 
 def get_all_season_ids():
-    """Return all NHL season IDs from 1917-18 through the most recently completed season."""
-    now = datetime.now()
-    end_year = now.year if now.month >= 9 else now.year - 1
+    """Return NHL season IDs from 1917-18 through the season currently under way.
+
+    Uses the shared `current_season_year()` helper rather than re-deriving the
+    rollover date, so the scraper and the app can never disagree about which season
+    it is. The current season is included on purpose: it is in progress for most of
+    the year and its players must be swept. A season that has not started yet simply
+    returns no rows, which costs two requests and adds nothing.
+
+    Returns:
+        List of eight-digit season id strings, oldest first.
+    """
+    end_year = current_season_year()
     return [f"{y}{y + 1}" for y in range(1917, end_year + 1)]
 
 
