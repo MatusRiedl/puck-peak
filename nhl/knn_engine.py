@@ -12,6 +12,7 @@ from nhl.constants import (
     STAT_CAPS,
     STAT_FLOORS,
     current_season_year,
+    season_games,
 )
 from nhl.era import apply_era_to_hist
 
@@ -73,8 +74,10 @@ def _apply_stat_cap(val: float, metric: str, stat_category: str) -> float:
     """Clamp one projected value to the configured cap, or floor for `GAA`."""
     if metric in STAT_CAPS:
         cap = STAT_CAPS[metric]
-        if metric == "GP" and stat_category == "Goalie":
-            cap = 65
+        if metric == "GP":
+            # STAT_CAPS carries the historical 82 as a static default; the live cap
+            # tracks the current schedule so an 83rd or 84th game is not clipped.
+            cap = 65 if stat_category == "Goalie" else season_games()
         val = max(val, cap) if metric == "GAA" else min(val, cap)
     if metric in STAT_FLOORS:
         val = max(val, STAT_FLOORS[metric])
@@ -221,13 +224,16 @@ def run_knn_projection(
     # Normalize to float so partial-season pacing can safely scale integer season totals.
     career_paced  = pd.to_numeric(career_df[metric], errors='coerce').astype(float)
 
-    # Mid-season pacing: extrapolate the last (current) season to 82 GP
+    # Mid-season pacing: extrapolate the last (current) season to a full schedule.
+    # Length is season-dependent - 84 games from 2026-27, 82 before - so a hardcoded
+    # 82 would understate every paced rate by ~2.4% once the expansion lands.
+    _full_season_gp = season_games()
     if (season_type != "Playoffs"
             and len(career_df) > 0
             and career_df.iloc[-1]['SeasonYear'] >= current_season_year()
-            and career_df.iloc[-1]['GP'] < 82
+            and career_df.iloc[-1]['GP'] < _full_season_gp
             and career_df.iloc[-1]['GP'] > 0):
-        pace = 82.0 / career_df.iloc[-1]['GP']
+        pace = float(_full_season_gp) / career_df.iloc[-1]['GP']
         if metric in ['Points', 'Goals', 'Assists', 'Wins', 'Shutouts', 'Saves', '+/-', 'PIM']:
             career_paced.iloc[-1] *= pace
 
@@ -426,7 +432,7 @@ def run_linear_fallback(
     proj_rows = []
     for age in range(int(max_age) + 1, 41):
         if metric == "GP":
-            gp_cap = 82 if stat_category == "Skater" else 65
+            gp_cap = season_games() if stat_category == "Skater" else 65
             # 4-phase durability curve
             if age <= 28:
                 current_val = min(gp_cap, current_val + 0.8)    # soft growth to prime

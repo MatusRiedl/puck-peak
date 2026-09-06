@@ -264,6 +264,43 @@ def current_season_year(today: date | None = None) -> int:
     return day.year if day.month >= SEASON_ROLLOVER_MONTH else day.year - 1
 
 
+SEASON_GAMES_STANDARD = 82
+"""Regular-season game count for seasons before the 2026-27 expansion."""
+
+SEASON_GAMES_EXPANDED = 84
+"""Regular-season game count from 2026-27 onward."""
+
+SEASON_GAMES_EXPANSION_YEAR = 2026
+"""First season played on the expanded schedule.
+
+Confirmed against `https://api.nhle.com/stats/rest/en/season`, which reports
+`totalRegularSeasonGames` of 1344 for seasonId 20262027 (1344 / 32 teams x 2 = 84)
+versus 1312 (82 games) for every season back to 2023-24.
+"""
+
+
+def season_games(season_year: int | None = None) -> int:
+    """Return the number of regular-season games for one season.
+
+    Used as the denominator for per-season pacing and as the games-played cap, so a
+    stale 82 understates every rate and clips legitimate 83rd and 84th games.
+
+    Note this is the scheduled full-season length, not a shortened-season lookup:
+    lockout and pandemic seasons are not modelled here because the pacing paths that
+    call this only ever ask about the current season.
+
+    Args:
+        season_year: Four-digit season start year. Defaults to the current season.
+
+    Returns:
+        Games in that season's regular schedule.
+    """
+    year = current_season_year() if season_year is None else int(season_year)
+    if year >= SEASON_GAMES_EXPANSION_YEAR:
+        return SEASON_GAMES_EXPANDED
+    return SEASON_GAMES_STANDARD
+
+
 def season_year_to_id(season_year: int) -> int:
     """Convert a season start year into an NHL season id (2026 -> 20262027).
 

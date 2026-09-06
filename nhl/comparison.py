@@ -9,7 +9,14 @@ from urllib.parse import urlencode
 import pandas as pd
 import streamlit as st
 
-from nhl.constants import ACTIVE_TEAMS, RATE_STATS, TEAM_BRAND_COLORS, TEAM_FOUNDED, TEAM_RATE_STATS
+from nhl.constants import (
+    ACTIVE_TEAMS,
+    RATE_STATS,
+    TEAM_BRAND_COLORS,
+    TEAM_FOUNDED,
+    TEAM_RATE_STATS,
+    season_games,
+)
 from nhl.data_loaders import (
     get_current_nhl_standings,
     get_player_career_rank,
@@ -381,6 +388,22 @@ def _format_chart_season_label(value: str | int) -> str:
         return f"{season_year}-{str(season_year + 1)[2:]}"
     except Exception:
         return str(value)
+
+
+def _season_year_for_pace(selected_season: str | int) -> int | None:
+    """Return the season start year to pace against, or None for the current season.
+
+    Args:
+        selected_season: Chart-season selection, either ``"All"`` or a start year.
+
+    Returns:
+        Four-digit season start year, or None when no specific season is selected so
+        the caller falls back to the season currently under way.
+    """
+    try:
+        return int(selected_season)
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_selected_season_mode(selected_season: str | int) -> bool:
@@ -1687,7 +1710,11 @@ def _render_overview_teams(
 
             extra_bits: list[str] = []
             if season_type == "Regular" and gp > 0:
-                extra_bits.append(f"{int(round(points / gp * 82))}-pt pace")
+                # Pace over the selected season's own schedule length. This was pinned
+                # at 82, which understates every 2026-27 pace by ~2.4% on a stat the
+                # card presents as a hard number.
+                _season_gp = season_games(_season_year_for_pace(selected_season))
+                extra_bits.append(f"{int(round(points / gp * _season_gp))}-pt pace")
             streak_label = _build_team_streak_label(real)
             if streak_label:
                 extra_bits.append(streak_label)

@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-from nhl.constants import CURRENT_SEASON_YEAR
+from nhl.constants import current_season_year, season_games
 from nhl.knn_engine import _apply_stat_cap, run_knn_projection, run_linear_fallback
 
 
@@ -19,7 +19,10 @@ class KNNEngineInvariantTests(unittest.TestCase):
             None.
         """
         self.assertEqual(_apply_stat_cap(70.0, "GP", "Goalie"), 65)
-        self.assertEqual(_apply_stat_cap(90.0, "GP", "Skater"), 82)
+        # The skater GP cap tracks the current schedule length (84 from 2026-27, 82
+        # before) rather than a frozen 82, so a legitimate 83rd or 84th game is not
+        # clipped away.
+        self.assertEqual(_apply_stat_cap(90.0, "GP", "Skater"), season_games())
         self.assertEqual(_apply_stat_cap(1.2, "GAA", "Goalie"), 1.8)
         self.assertEqual(_apply_stat_cap(-90.0, "+/-", "Skater"), -60)
 
@@ -236,7 +239,7 @@ class KNNEngineInvariantTests(unittest.TestCase):
             {
                 "Age": [30, 31],
                 "Points": [20, 25],
-                "SeasonYear": [CURRENT_SEASON_YEAR - 1, CURRENT_SEASON_YEAR],
+                "SeasonYear": [current_season_year() - 1, current_season_year()],
                 "GP": [82, 41],
                 "BaseName": ["Landing Page Skater", "Landing Page Skater"],
             }
