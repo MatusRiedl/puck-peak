@@ -3,9 +3,9 @@ nhl.fragments — `@st.fragment` wrappers around the three slow render panels.
 
 Fragments exist solely so that *post-load* widget interactions inside the
 chart, detail tabs, or predictions panel rerun only that scoped block — not
-the entire app. They do not own the cold-load lifecycle: app.py paints
-skeletons first, runs the pipeline, then mounts the appropriate fragment
-into the swapped slot.
+the entire app. They do not own the load lifecycle: app.py creates empty
+slots, runs the pipeline, then mounts the appropriate fragment into the
+slot.
 
 Keeping these wrappers thin and module-level so Streamlit can register the
 fragment scopes properly.

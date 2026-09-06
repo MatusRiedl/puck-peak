@@ -4,6 +4,10 @@ services:
     image: puck-peak:latest
     container_name: puck-peak
     restart: unless-stopped
+    # Mirrors the Dockerfile default so the warmer is visible and overridable at
+    # the deploy layer without rebuilding the image.
+    environment:
+      PUCKPEAK_CACHE_WARMER_ENABLED: "1"
     expose:
       - "8501"
     volumes:

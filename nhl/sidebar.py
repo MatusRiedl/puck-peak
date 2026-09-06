@@ -577,7 +577,7 @@ def _render_player_sidebar() -> dict:
     if team_abbr:
         st.markdown(
             f"<div style='text-align:center;margin-bottom:5px;'>"
-            f"<img src='https://assets.nhle.com/logos/nhl/svg/{team_abbr}_light.svg' height='40'>"
+            f"<img src='https://assets.nhle.com/logos/nhl/svg/{team_abbr}_light.svg' height='40' alt='{escape(str(team_abbr))} logo'>"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -666,7 +666,7 @@ def _render_team_sidebar() -> dict:
     if _logo_abbr and _logo_abbr != _SENT:
         st.markdown(
             f"<div style='text-align:center;margin-bottom:5px;'>"
-            f"<img src='https://assets.nhle.com/logos/nhl/svg/{_logo_abbr}_light.svg' height='40'>"
+            f"<img src='https://assets.nhle.com/logos/nhl/svg/{_logo_abbr}_light.svg' height='40' alt='{escape(str(_logo_abbr))} logo'>"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -696,7 +696,7 @@ def _render_team_sidebar() -> dict:
                 st.markdown(
                     f"<div style='display:flex;align-items:center;gap:8px;margin:0;'>"
                     f"<img src='{_logo_url}' style='width:32px;height:32px;"
-                    f"object-fit:contain;flex-shrink:0;'>"
+                    f"object-fit:contain;flex-shrink:0;' alt='{safe_team_name} logo'>"
                     f"<div class='player-name'>{safe_team_name}</div>"
                     f"</div>",
                     unsafe_allow_html=True,

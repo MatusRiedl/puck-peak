@@ -48,7 +48,7 @@ https://nhl-age-curves.streamlit.app/
 
 * **Player Headshots:** Each active roster entry in the sidebar shows the player's circular headshot thumbnail pulled from the NHL API. Headshots use native `loading="lazy"` inside a shimmer wrapper so a grey circle paints instantly while the image decodes.
 
-* **Paint-First Skeleton Loaders:** The chart, detail tabs, and predictions panel paint shimmer placeholders before the pipeline runs, then swap to real content in place once data lands. Post-load widget interactions are scoped through `@st.fragment` so toggling chart options never reflashes the skeletons.
+* **Scoped Reruns:** The chart, detail tabs, and predictions panel render into `st.empty()` slots created before the pipeline runs, then fill in place once data lands. Each panel is wrapped in `@st.fragment` so post-load widget interactions (toggles, season picker) only rerun that scoped block instead of the whole app.
 
 ## Tech Stack
 * **Frontend/Framework:** Streamlit
@@ -95,7 +95,6 @@ nhl/
     dialog.py            season-detail and matchup-history dialogs
     chart.py             Plotly chart rendering, share link, JS pan-clamp, and chart click bridge
     comparison.py        Overview/Current Standings detail tabs, chart-season picker helper, clickable predictions panel, and live standings wrapper
-    skeletons.py         static shimmer-skeleton HTML generators painted before the pipeline runs
     fragments.py         @st.fragment wrappers around the chart, detail tabs, and predictions panel so post-load widget reruns stay scoped
     ui_state.py          shared Streamlit session-state guards for modal orchestration
     stanley_cup.py       standings-board and Cup-pick builder
@@ -120,7 +119,7 @@ win_prob_weights.json    offline-trained logistic-regression weights used at run
 9. Launch the app by opening a terminal in the folder and write `streamlit run app.py`
 
 Optional:
-- Set `PUCKPEAK_CACHE_WARMER_ENABLED=1` if you want the process-local background cache warmer to run in development or production.
+- Set `PUCKPEAK_CACHE_WARMER_ENABLED=1` if you want the process-local background cache warmer to run in development. It is off by default locally so dev runs stay quiet, and the Docker image sets it to `1` so production always warms.
 
 ## Deployment (Docker)
 
@@ -158,7 +157,7 @@ cd /opt/puck-peak && docker compose up -d --build
 cd /opt/caddy     && docker compose up -d
 ```
 
-No firewall rules needed (ufw inactive; Hetzner Cloud firewall opens 22/80/443 at the edge). No env vars or secrets — the NHL APIs are public and the app has no auth.
+No firewall rules needed (ufw inactive; Hetzner Cloud firewall opens 22/80/443 at the edge). No secrets — the NHL APIs are public and the app has no auth. The only env var is `PUCKPEAK_CACHE_WARMER_ENABLED=1`, set in the `Dockerfile` and mirrored in `docker-compose.yml`; without it the background warmer never starts and the first visitor after each container restart pays the full cold-fetch cost inside their own page load.
 
 ### Redeploy (after pushing a new commit to `main`)
 
