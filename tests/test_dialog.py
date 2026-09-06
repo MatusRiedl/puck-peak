@@ -177,7 +177,31 @@ class MatchupCardTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(summary, "LAK won 1, NYI won 1, with 1 tie in the last 3 meetings shown.")
+        # The helper returns counts; the dialog owns the wording. It used to return a
+        # prose sentence, which meant any copy tweak broke the arithmetic test.
+        # LAK won game 1 away, NYI won game 2 away (NYI is the home side of the
+        # matchup), game 3 was a tie.
+        self.assertEqual(
+            summary,
+            {"away_wins": 1, "home_wins": 1, "ties": 1, "total": 3},
+        )
+
+    def test_matchup_history_summary_skips_games_with_missing_scores(self):
+        """Meetings without usable scores are ignored rather than counted as ties."""
+        summary = dialog._build_matchup_history_summary(
+            "BOS",
+            "MTL",
+            [
+                {"away_abbr": "BOS", "away_score": 2, "home_abbr": "MTL", "home_score": 1},
+                {"away_abbr": "BOS", "away_score": None, "home_abbr": "MTL", "home_score": None},
+                {"away_abbr": "MTL", "away_score": "x", "home_abbr": "BOS", "home_score": 3},
+            ],
+        )
+
+        self.assertEqual(
+            summary,
+            {"away_wins": 1, "home_wins": 0, "ties": 0, "total": 1},
+        )
 
     def test_matchup_history_dialog_renders_title_and_all_cards(self):
         """Render the matchup-history modal body with one card per prior meeting."""
@@ -218,10 +242,20 @@ class MatchupCardTests(unittest.TestCase):
             dialog.show_matchup_history.__wrapped__("EDM", "DAL", 10)
 
         markdown_calls = [str(call.args[0]) for call in mock_markdown.call_args_list if call.args]
-        self.assertIn("### EDM at DAL - Last 10 meetings", markdown_calls[0])
-        self.assertIn("EDM won 1, DAL won 1 in the last 2 meetings shown.", markdown_calls[1])
-        self.assertIn("American Airlines Center", markdown_calls[2])
-        self.assertIn("Rogers Place", markdown_calls[3])
+
+        # The header is now one styled HTML block carrying both the matchup title and
+        # the win summary, not two markdown headings. Assert the content, not the tags.
+        header = markdown_calls[0]
+        self.assertIn("EDM", header)
+        self.assertIn("DAL", header)
+        self.assertIn("In the last 2 matchups", header)
+        self.assertIn("EDM won 1", header)
+        self.assertIn("DAL won 1", header)
+
+        # One card per prior meeting, each naming its venue.
+        body = "".join(markdown_calls[1:])
+        self.assertIn("American Airlines Center", body)
+        self.assertIn("Rogers Place", body)
         mock_info.assert_not_called()
 
     def test_matchup_history_dialog_shows_empty_state_when_no_games_exist(self):
@@ -321,7 +355,8 @@ class IdentityDialogTests(unittest.TestCase):
             dialog.show_team_identity_details.__wrapped__("UTA")
 
         markdown_calls = [str(call.args[0]) for call in mock_markdown.call_args_list if call.args]
-        self.assertIn("### Utah Hockey Club", markdown_calls[0])
+        # Title is a styled HTML block now, not a markdown heading.
+        self.assertIn("Utah Hockey Club", markdown_calls[0])
         self.assertTrue(any("Joined NHL" in line and "1979-80" in line for line in markdown_calls))
         self.assertTrue(any("Current identity since" in line and "2024-25" in line for line in markdown_calls))
         self.assertTrue(any("Total NHL seasons" in line and "46" in line for line in markdown_calls))

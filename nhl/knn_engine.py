@@ -7,11 +7,12 @@ clone-prior blend. GP stays out of the KNN path.
 import pandas as pd
 
 from nhl.constants import (
-    CURRENT_SEASON_YEAR,
     ML_SUPPORTED_METRICS,
     RATE_STATS,
     STAT_CAPS,
     STAT_FLOORS,
+    current_season_year,
+    season_games,
 )
 from nhl.era import apply_era_to_hist
 
@@ -20,12 +21,63 @@ from nhl.era import apply_era_to_hist
 # Private helpers
 # ---------------------------------------------------------------------------
 
+# Memo for _career_years_map(). Holds at most one entry: hist_df is the immutable
+# parquet-backed career table, so a second fingerprint only appears if the file is
+# swapped under a running process. Deliberately a plain dict rather than
+# @st.cache_data — this module has no Streamlit dependency and keeping it that way
+# is what makes it reusable outside the app.
+_CAREER_YEARS_MEMO: dict[tuple, dict] = {}
+
+
+def _career_years_map(hist_df: pd.DataFrame) -> dict:
+    """Return ``{PlayerID: (start_yy, end_yy)}`` for the historical career table.
+
+    Built from raw `SeasonYear` values, which era adjustment never touches, so the
+    result is stable for a given parquet file. Memoized because this is called once
+    per player per rerun from `run_knn_projection`, and rebuilding it dominated
+    interaction latency (~70 ms per call over ~8.7k players).
+
+    Args:
+        hist_df: Raw historical career DataFrame, not era-adjusted.
+
+    Returns:
+        Dict mapping int PlayerID to a (first season, last season) pair of
+        two-digit year strings, or an empty dict when the frame lacks the columns.
+    """
+    if hist_df.empty or 'SeasonYear' not in hist_df.columns or 'PlayerID' not in hist_df.columns:
+        return {}
+
+    fingerprint = (
+        len(hist_df),
+        int(hist_df['SeasonYear'].iat[0]),
+        int(hist_df['SeasonYear'].iat[-1]),
+    )
+    cached = _CAREER_YEARS_MEMO.get(fingerprint)
+    if cached is not None:
+        return cached
+
+    year_bounds = hist_df.groupby('PlayerID')['SeasonYear'].agg(['min', 'max'])
+    # zip over the raw columns rather than .iterrows(): iterrows builds a Series per
+    # row, which is what made the original loop cost ~70 ms.
+    result = {
+        int(pid): (str(int(low))[2:], str(int(high))[2:])
+        for pid, low, high in zip(
+            year_bounds.index, year_bounds['min'], year_bounds['max']
+        )
+    }
+    _CAREER_YEARS_MEMO.clear()
+    _CAREER_YEARS_MEMO[fingerprint] = result
+    return result
+
+
 def _apply_stat_cap(val: float, metric: str, stat_category: str) -> float:
     """Clamp one projected value to the configured cap, or floor for `GAA`."""
     if metric in STAT_CAPS:
         cap = STAT_CAPS[metric]
-        if metric == "GP" and stat_category == "Goalie":
-            cap = 65
+        if metric == "GP":
+            # STAT_CAPS carries the historical 82 as a static default; the live cap
+            # tracks the current schedule so an 83rd or 84th game is not clipped.
+            cap = 65 if stat_category == "Goalie" else season_games()
         val = max(val, cap) if metric == "GAA" else min(val, cap)
     if metric in STAT_FLOORS:
         val = max(val, STAT_FLOORS[metric])
@@ -172,13 +224,16 @@ def run_knn_projection(
     # Normalize to float so partial-season pacing can safely scale integer season totals.
     career_paced  = pd.to_numeric(career_df[metric], errors='coerce').astype(float)
 
-    # Mid-season pacing: extrapolate the last (current) season to 82 GP
+    # Mid-season pacing: extrapolate the last (current) season to a full schedule.
+    # Length is season-dependent - 84 games from 2026-27, 82 before - so a hardcoded
+    # 82 would understate every paced rate by ~2.4% once the expansion lands.
+    _full_season_gp = season_games()
     if (season_type != "Playoffs"
             and len(career_df) > 0
-            and career_df.iloc[-1]['SeasonYear'] >= CURRENT_SEASON_YEAR
-            and career_df.iloc[-1]['GP'] < 82
+            and career_df.iloc[-1]['SeasonYear'] >= current_season_year()
+            and career_df.iloc[-1]['GP'] < _full_season_gp
             and career_df.iloc[-1]['GP'] > 0):
-        pace = 82.0 / career_df.iloc[-1]['GP']
+        pace = float(_full_season_gp) / career_df.iloc[-1]['GP']
         if metric in ['Points', 'Goals', 'Assists', 'Wins', 'Shutouts', 'Saves', '+/-', 'PIM']:
             career_paced.iloc[-1] *= pace
 
@@ -247,13 +302,7 @@ def run_knn_projection(
     dist     = dist / n_shared
 
     # Build career year ranges from the raw hist_df (SeasonYear is not era-adjusted)
-    career_years_map: dict = {}
-    if 'SeasonYear' in hist_df.columns and 'PlayerID' in hist_df.columns:
-        yr = hist_df.groupby('PlayerID')['SeasonYear'].agg(['min', 'max'])
-        career_years_map = {
-            int(pid): (str(int(row['min']))[2:], str(int(row['max']))[2:])
-            for pid, row in yr.iterrows()
-        }
+    career_years_map = _career_years_map(hist_df)
 
     top_ids        = dist.nsmallest(10).index
     clone_names    = _build_clone_names(
@@ -383,7 +432,7 @@ def run_linear_fallback(
     proj_rows = []
     for age in range(int(max_age) + 1, 41):
         if metric == "GP":
-            gp_cap = 82 if stat_category == "Skater" else 65
+            gp_cap = season_games() if stat_category == "Skater" else 65
             # 4-phase durability curve
             if age <= 28:
                 current_val = min(gp_cap, current_val + 0.8)    # soft growth to prime

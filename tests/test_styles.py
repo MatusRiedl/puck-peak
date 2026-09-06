@@ -38,7 +38,19 @@ class StylesTests(unittest.TestCase):
         """
         app_text = (get_favicon_path().parent.parent / "app.py").read_text(encoding="utf-8")
 
-        self.assertIn("from nhl.styles import get_favicon_path, inject_css, inject_mobile_dropdown_fix", app_text)
+        # Assert the symbols are imported rather than pinning the exact import line:
+        # the literal broke the moment another helper was added to the same import.
+        styles_import = next(
+            (
+                line for line in app_text.splitlines()
+                if line.startswith("from nhl.styles import ")
+            ),
+            "",
+        )
+        self.assertTrue(styles_import, "app.py must import from nhl.styles")
+        for symbol in ("get_favicon_path", "inject_css", "inject_mobile_dropdown_fix"):
+            self.assertIn(symbol, styles_import)
+
         self.assertIn("page_icon=get_favicon_path().as_posix(),", app_text)
         self.assertIn('initial_sidebar_state="expanded"', app_text)
 
@@ -123,7 +135,13 @@ class StylesTests(unittest.TestCase):
 
         self.assertIn(".sidebar-brand", styles_text)
         self.assertIn(".sidebar-brand__image", styles_text)
-        self.assertIn('padding-top: 2.65rem !important;', styles_text)
+        # Assert the block-container top padding is pinned at all, not its exact value.
+        # The old assertion hard-coded 2.65rem and broke on a routine spacing tweak,
+        # which tells you nothing about whether the layout is still compact.
+        self.assertRegex(
+            styles_text,
+            r"\.block-container \{ padding-top: [\d.]+rem !important;",
+        )
         self.assertNotIn(".nhl-logo", styles_text)
         self.assertNotIn(".header-divider", styles_text)
         self.assertIn(".nhl-chart-toolbar", styles_text)

@@ -9,7 +9,12 @@ import streamlit as st
 
 from nhl.api import get_client
 from nhl.cache import T1_TTL, T2_DEFAULT_TTL, T3_DEFAULT_TTL
-from nhl.constants import ACTIVE_TEAMS, CURRENT_SEASON_YEAR, TEAM_LINEAGES
+from nhl.constants import (
+    ACTIVE_TEAMS,
+    TEAM_LINEAGES,
+    current_season_year,
+    previous_season_year,
+)
 from nhl.data_loaders import (
     get_team_available_nhl_seasons,
     get_team_season_game_log,
@@ -35,7 +40,12 @@ _CLUB_STATS_URL  = "https://api-web.nhle.com/v1/club-stats/{}/now"
 
 _LIVE_STATES        = {"LIVE", "CRIT"}
 _FINAL_STATES       = {"FINAL", "OVER", "OFF"}
+_FUTURE_STATES      = {"FUT", "PRE"}
 _VALID_GAME_TYPES   = {2, 3}   # 2 = regular season, 3 = playoffs
+# Preseason (1) counts as "something to show". Excluded from _VALID_GAME_TYPES because
+# preseason results must not feed standings or win-probability math, but the matchups
+# are real and are the only NHL games on the calendar for most of September.
+_UPCOMING_GAME_TYPES = {1, 2, 3}
 _CENTRAL_EUROPE_TZ  = ZoneInfo("Europe/Prague")
 _WEEKDAY_ABBR       = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _MONTH_ABBR         = (
@@ -102,31 +112,72 @@ def get_live_or_recent_game() -> tuple[str, str] | None:
 
 
 @st.cache_data(ttl=300)
-def get_upcoming_games(limit: int = 6, days_ahead: int = 14) -> list[dict]:
-    """Return the next few upcoming games for the Live games tab."""
+def get_upcoming_games(limit: int = 6, days_ahead: int = 60) -> list[dict]:
+    """Return the next few upcoming games for the Live games tab.
+
+    Reads the multi-day scoreboard first, which covers roughly 11 days in a single
+    request and, in the offseason, rolls its own window forward to the next games on
+    the calendar. Only if that comes up short does this walk individual dates.
+
+    The default window is wide enough to span the September gap between the last
+    preseason slate and opening night. A 14-day window returned nothing at all in
+    early September: the only games inside it were preseason, and the first regular
+    season game sat just beyond the edge.
+
+    Args:
+        limit: Maximum number of games to return.
+        days_ahead: How many days forward the per-date fallback may walk.
+
+    Returns:
+        A list of normalized upcoming-game dicts, soonest first.
+    """
     if limit <= 0:
         return []
 
     try:
         now_utc = datetime.now(timezone.utc)
         upcoming_games: list[dict] = []
+        seen_game_ids: set[int] = set()
 
         client = get_client()
-        for day_offset in range(max(days_ahead, 0) + 1):
-            date_str = (now_utc + timedelta(days=day_offset)).strftime("%Y-%m-%d")
-            data = client.get(
-                url=_SCORE_DATE_URL.format(date=date_str),
-                cache_key=f"score:{date_str}",
-                ttl=T3_DEFAULT_TTL,
-                timeout=5,
-            )
-            if data is None:
-                continue
 
-            upcoming_games.extend(_extract_upcoming_games(data.get("games", []), now_utc))
+        def _absorb(games: list[dict]) -> None:
+            """Add newly seen upcoming games from one payload, de-duplicated by id."""
+            for game in _extract_upcoming_games(games, now_utc):
+                game_id = game.get("game_id", 0)
+                if game_id and game_id in seen_game_ids:
+                    continue
+                seen_game_ids.add(game_id)
+                upcoming_games.append(game)
 
-            if len(upcoming_games) >= limit:
-                break
+        scoreboard = client.get(
+            url=_SCOREBOARD_URL,
+            cache_key="scoreboard",
+            ttl=T3_DEFAULT_TTL,
+            timeout=5,
+        )
+        if scoreboard:
+            for day in scoreboard.get("gamesByDate", []) or []:
+                _absorb(day.get("games", []) or [])
+
+        # Per-date fallback: only runs when the scoreboard window was empty or thin,
+        # so the common case costs one request rather than fifteen.
+        if len(upcoming_games) < limit:
+            for day_offset in range(max(days_ahead, 0) + 1):
+                date_str = (now_utc + timedelta(days=day_offset)).strftime("%Y-%m-%d")
+                data = client.get(
+                    url=_SCORE_DATE_URL.format(date=date_str),
+                    cache_key=f"score:{date_str}",
+                    ttl=T3_DEFAULT_TTL,
+                    timeout=5,
+                )
+                if data is None:
+                    continue
+
+                _absorb(data.get("games", []) or [])
+
+                if len(upcoming_games) >= limit:
+                    break
 
         upcoming_games.sort(key=lambda game: game["sort_ts"])
         trimmed_games = upcoming_games[:limit]
@@ -279,15 +330,30 @@ def get_game_win_probabilities(away_abbr: str, home_abbr: str) -> dict | None:
         return None
 
     try:
-        away_games = get_team_season_game_log(clean_away_abbr, CURRENT_SEASON_YEAR)
-        home_games = get_team_season_game_log(clean_home_abbr, CURRENT_SEASON_YEAR)
-        away_regular = _filter_regular_season_games(away_games)
-        home_regular = _filter_regular_season_games(home_games)
-        matchup_snapshot = build_matchup_snapshot(
-            home_regular,
-            away_regular,
-            min_games=int(artifact.get("min_games", MIN_GAMES_FOR_ESTIMATE)),
-        )
+        min_games = int(artifact.get("min_games", MIN_GAMES_FOR_ESTIMATE))
+
+        # Try the current season first, then fall back to the previous one. Both teams
+        # need min_games played before a snapshot can be built, so from the offseason
+        # through roughly the first two weeks of a season the current year yields
+        # nothing — without the fallback every card reads "Estimate unavailable" for
+        # the stretch when interest in the app is highest.
+        matchup_snapshot = None
+        season_used = current_season_year()
+        for candidate_year in (current_season_year(), previous_season_year()):
+            away_regular = _filter_regular_season_games(
+                get_team_season_game_log(clean_away_abbr, candidate_year)
+            )
+            home_regular = _filter_regular_season_games(
+                get_team_season_game_log(clean_home_abbr, candidate_year)
+            )
+            matchup_snapshot = build_matchup_snapshot(
+                home_regular,
+                away_regular,
+                min_games=min_games,
+            )
+            if matchup_snapshot is not None:
+                season_used = candidate_year
+                break
         if matchup_snapshot is None:
             return None
 
@@ -325,6 +391,8 @@ def get_game_win_probabilities(away_abbr: str, home_abbr: str) -> dict | None:
             ),
             "base_home_pct": int(round(base_home_prob * 100.0)),
             "base_away_pct": 100 - int(round(base_home_prob * 100.0)),
+            "season_used": season_used,
+            "is_prior_season": season_used != current_season_year(),
         }
     except Exception:
         return None
@@ -407,8 +475,13 @@ def _build_matchup_history_game(game_row: dict, score_details: dict) -> dict:
 
 
 def _find_game_from_data(data: dict, reverse_dates: bool = False) -> tuple[str, str] | None:
-    """Parse a NHL score payload and return (home_abbr, away_abbr) of a
-    live or recently finished regular/playoff game, or None if none found.
+    """Parse a NHL score payload and return (home_abbr, away_abbr) for one game.
+
+    Preference order is live, then most recently finished, then the soonest
+    upcoming game. The upcoming pass is what keeps the app populated through the
+    offseason: between the Cup final and opening night there is no live or finished
+    game anywhere in the payload, and without it the board seeds nothing and the
+    landing page renders empty.
 
     Args:
         data: Pre-fetched score endpoint JSON payload.
@@ -453,6 +526,21 @@ def _find_game_from_data(data: dict, reverse_dates: bool = False) -> tuple[str, 
                 away = game.get("awayTeam", {}).get("abbrev", "")
                 if home and away:
                     return (home, away)
+
+    # Nothing live or finished — fall back to the soonest upcoming game, preseason
+    # included. Re-filtered and re-sorted ascending: `valid` above is regular/playoff
+    # only and ordered most-recent-first, which is the wrong end for future games.
+    upcoming = [
+        g for g in all_games
+        if g.get("gameType") in _UPCOMING_GAME_TYPES
+        and g.get("gameState") in _FUTURE_STATES
+    ]
+    upcoming.sort(key=_get_start_time)
+    for game in upcoming:
+        home = game.get("homeTeam", {}).get("abbrev", "")
+        away = game.get("awayTeam", {}).get("abbrev", "")
+        if home and away:
+            return (home, away)
 
     return None
 
@@ -587,9 +675,9 @@ def _extract_upcoming_games(games: list[dict], now_utc: datetime) -> list[dict]:
     upcoming_games: list[dict] = []
 
     for game in games:
-        if game.get("gameType") not in _VALID_GAME_TYPES:
+        if game.get("gameType") not in _UPCOMING_GAME_TYPES:
             continue
-        if game.get("gameState") != "FUT":
+        if game.get("gameState") not in _FUTURE_STATES:
             continue
 
         start_dt_utc = _parse_utc_timestamp(game.get("startTimeUTC"))

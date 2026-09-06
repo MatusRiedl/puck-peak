@@ -9,7 +9,14 @@ from urllib.parse import urlencode
 import pandas as pd
 import streamlit as st
 
-from nhl.constants import ACTIVE_TEAMS, RATE_STATS, TEAM_BRAND_COLORS, TEAM_FOUNDED, TEAM_RATE_STATS
+from nhl.constants import (
+    ACTIVE_TEAMS,
+    RATE_STATS,
+    TEAM_BRAND_COLORS,
+    TEAM_FOUNDED,
+    TEAM_RATE_STATS,
+    season_games,
+)
 from nhl.data_loaders import (
     get_current_nhl_standings,
     get_player_career_rank,
@@ -381,6 +388,22 @@ def _format_chart_season_label(value: str | int) -> str:
         return f"{season_year}-{str(season_year + 1)[2:]}"
     except Exception:
         return str(value)
+
+
+def _season_year_for_pace(selected_season: str | int) -> int | None:
+    """Return the season start year to pace against, or None for the current season.
+
+    Args:
+        selected_season: Chart-season selection, either ``"All"`` or a start year.
+
+    Returns:
+        Four-digit season start year, or None when no specific season is selected so
+        the caller falls back to the season currently under way.
+    """
+    try:
+        return int(selected_season)
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_selected_season_mode(selected_season: str | int) -> bool:
@@ -1175,6 +1198,10 @@ def _build_live_game_card_html(game: dict) -> str:
     home_short_name = _get_team_short_name(home_abbr, game.get("home_name", ""))
 
     detail_bits = [game["start_label_cest"]]
+    if int(game.get("game_type", 0) or 0) == 1:
+        # Preseason games are shown so the panel is not empty through September, but
+        # they must read as exhibition rather than as season games.
+        detail_bits.append("Preseason")
     if game.get("venue"):
         detail_bits.append(game["venue"])
     detail_text = escape(" • ".join(detail_bits))
@@ -1261,11 +1288,26 @@ def _build_live_game_card_html(game: dict) -> str:
         playoff_note = ""
         if int(game.get("game_type", 0) or 0) == 3:
             playoff_note = "<div class='live-games-probability__meta live-games-probability__meta--playoff'>Regular-season calibrated model.</div>"
+        # Until both teams have enough games logged this season the estimate is built
+        # from the prior season. Say so rather than passing it off as current form.
+        season_note = ""
+        if probability.get("is_prior_season"):
+            _prior_year = probability.get("season_used")
+            try:
+                _prior_label = f"{int(_prior_year)}-{str(int(_prior_year) + 1)[2:]}"
+            except Exception:
+                _prior_label = "prior"
+            season_note = (
+                "<div class='live-games-probability__meta'>"
+                f"Based on {escape(_prior_label)} form — too few games this season."
+                "</div>"
+            )
         meta_block = (
             "<div class='lgc-meta-popover'>"
             "<div class='lgc-meta'>"
             f"<div class='live-games-probability__meta'>{model_label}</div>"
             f"<div class='live-games-probability__meta'>{goalie_label}</div>"
+            f"{season_note}"
             f"{playoff_note}"
             "</div>"
             "</div>"
@@ -1292,7 +1334,11 @@ def _build_live_game_card_html(game: dict) -> str:
         )
     else:
         meta_block = ""
-        prob_section = "<div class='lgc-prob-section live-games-probability--muted'>Estimate unavailable.</div>"
+        prob_section = (
+            "<div class='lgc-prob-section live-games-probability--muted'>"
+            "Estimate available once both teams have played a few games."
+            "</div>"
+        )
         card_style = ""
         panel_state = "no-prob"
 
@@ -1664,7 +1710,11 @@ def _render_overview_teams(
 
             extra_bits: list[str] = []
             if season_type == "Regular" and gp > 0:
-                extra_bits.append(f"{int(round(points / gp * 82))}-pt pace")
+                # Pace over the selected season's own schedule length. This was pinned
+                # at 82, which understates every 2026-27 pace by ~2.4% on a stat the
+                # card presents as a hard number.
+                _season_gp = season_games(_season_year_for_pace(selected_season))
+                extra_bits.append(f"{int(round(points / gp * _season_gp))}-pt pace")
             streak_label = _build_team_streak_label(real)
             if streak_label:
                 extra_bits.append(streak_label)

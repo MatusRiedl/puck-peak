@@ -48,13 +48,13 @@ and stacked matchup cards. The primary trigger is a small JS bridge mounted thro
 - attempts to start the optional process-local background cache warmer early through `start_background_warmer()`; this is a no-op unless the env flag enables it
 - loads URL params once
 - seeds session state
-- auto-loads a live or recent game once per session when appropriate
+- auto-loads a live, recent, or next-scheduled game once per session when appropriate
 - runs the older session-local `async_preloader.py` warm-up once per session for non-active categories
 - renders sidebar and controls
 - dispatches to `process_players()` or `process_teams()`
 - renders the chart-column `Chart season` picker, the right-rail predictions area, and the comparison panel
 
-`app.py` runs a three-phase render pass: a paint phase that creates `st.empty()` slots and injects shimmer skeleton HTML from `nhl/skeletons.py` before any pipeline call (so structure paints in under ~100ms during cold-cache loads), a fetch phase that runs `process_players()` / `process_teams()` synchronously, and a mount phase that calls `slot.empty()` and re-renders into the same slot through the `@st.fragment`-wrapped helpers in `nhl/fragments.py`. The fragments exist so post-load widget interactions only rerun the chart, detail tabs, or predictions panel they sit in - they do not own the cold-load lifecycle.
+`app.py` runs a three-phase render pass: a slot phase that creates empty `st.empty()` slots before any pipeline call (fixing the page layout order without painting any placeholder content), a fetch phase that runs `process_players()` / `process_teams()` synchronously, and a mount phase that calls `slot.empty()` and renders into the same slot through the `@st.fragment`-wrapped helpers in `nhl/fragments.py`. The slots are left empty until mount because pre-painting shimmer skeletons caused a visible flash on every full rerun (sidebar click, season picker, page refresh) - an empty slot produces no delta until it is filled, so there is no flash. The fragments exist so post-load widget interactions only rerun the chart, detail tabs, or predictions panel they sit in.
 
 SECTION 2 - FILE STRUCTURE
 --------------------------
@@ -89,12 +89,11 @@ Top level:
 - `dialog.py` - chart click dialogs and matchup-history modal
 - `chart.py` - Plotly render, baseline overlay, share link, native point-click dispatch, and dialog routing
 - `comparison.py` - Overview / Current Standings tabs, the chart-season picker renderer, clickable predictions panel, and live standings board markup
-- `skeletons.py` - static shimmer-skeleton HTML for chart, detail tabs, and predictions; painted before the pipeline so the page is not blank on cold loads
 - `fragments.py` - `@st.fragment` wrappers around `render_chart`, `render_detail_tabs`, and `render_predictions_panel` so post-load widget interactions stay scoped to one panel
 - `ui_state.py` - shared session-state helpers for modal-slot guards
 - `stanley_cup.py` - current-standings / Cup-pick board builder
 - `url_params.py` - compact share-link encode/decode with legacy-link sanitization and canonicalization
-- `schedule.py` - live defaults, upcoming games, featured players, matchup-history loading, and runtime win-prob inference
+- `schedule.py` - live defaults (live > finished > soonest upcoming, preseason included), upcoming games, featured players, matchup-history loading, and runtime win-prob inference
 - `cache_warmer.py` - optional process-local daemon warmer for shared-cache live / seasonal / historical paths
 - `async_preloader.py` - older session-local additive preloader for non-active categories inside the current worker
 
@@ -514,7 +513,7 @@ Import shape:
 - runtime/cache layer: `cache`, `api`, `data_loaders`, `schedule`, `baselines`, `cache_warmer`
 - pure processing: `knn_engine`, `player_pipeline`, `team_pipeline`
 - additive preload helper: `async_preloader`
-- UI: `controls`, `sidebar`, `dialog`, `chart`, `comparison`, `skeletons`, `fragments`
+- UI: `controls`, `sidebar`, `dialog`, `chart`, `comparison`, `fragments`
 - `app.py` ties everything together
 
 Module responsibilities:
@@ -537,7 +536,6 @@ Module responsibilities:
 - `dialog.py` now inserts the rarity callout directly under `Career Subtotals` in player age snapshots
 - `chart.py` - figure assembly, baseline overlay, share-link button, Plotly click bridge, and player/team click dispatch
 - `comparison.py` - season-aware Overview / Current Standings tabs, the chart-season picker renderer, JS click bridges (prediction-card and identity-card), clickable predictions panel, and live standings board wrapper
-- `skeletons.py` - HTML generators for the paint-first shimmer placeholders rendered by `app.py` into the chart, detail tabs, and predictions slots before the pipeline runs
 - `fragments.py` - `@st.fragment`-decorated wrappers around `render_chart`, `render_detail_tabs`, and `render_predictions_panel`; called during the mount phase so post-load widget interactions only rerun the affected panel
 - `stanley_cup.py` - standings-board assembly and Cup-pick summarization
 - `url_params.py` - compact share-link encoder/decoder with legacy-link sanitization and canonicalization
@@ -546,9 +544,13 @@ Module responsibilities:
 - `async_preloader.py` - older per-session non-active-category warm-up inside the current worker
 
 Key integration notes:
-- `app.py` calls `start_background_warmer()` during startup, but the warmer is disabled unless `PUCKPEAK_CACHE_WARMER_ENABLED` is truthy
+- `app.py` calls `start_background_warmer()` during startup, but the warmer is disabled unless `PUCKPEAK_CACHE_WARMER_ENABLED` is truthy. The `Dockerfile` sets it to `1` (mirrored in `docker-compose.yml`) so production always warms; it stays off by default for local and test runs. Do not remove it from the image - without the warmer, the first visitor after every container restart pays the cold `fetch_all_time_records` fetch (~11s) inside their own page load.
 - `app.py` still calls `preload_all_categories()` once per session after default seeding; treat that as additive latency smoothing, not the primary cache strategy
 - `schedule.py` only auto-seeds the board on first session load and only if a shared URL did not already populate players or teams
+- `_find_game_from_data()` prefers a live game, then the most recently finished one, then the soonest upcoming game (preseason included). The upcoming pass is what keeps the landing page populated through the offseason - without it the board seeds empty from the Cup final until opening night
+- `get_upcoming_games()` reads `/v1/scoreboard/now` first (~11 days in one request, and it rolls its own window forward to the next games during the offseason) and only walks individual `/v1/score/{date}` days when that came up short. The default window is 60 days, wide enough to span the September gap between the last preseason game and opening night; the old 14-day window returned nothing at all in early September
+- `get_game_win_probabilities()` tries the current season and falls back to the previous one when either team has not yet played `min_games`. Results carry `season_used` and `is_prior_season` so the card can say which season the estimate came from
+- the season is resolved through `current_season_year()` in `nhl/constants.py`, called per use rather than read as an import-time constant. A container started before the September rollover would otherwise serve the previous season for its entire lifetime
 - `comparison.py` stores tab memory per category via `panel_tab_skater`, `panel_tab_goalie`, and `panel_tab_team`
 - `comparison.py` now prefers a JS trigger from `st.components.v2.component()` for prediction-card
   clicks and falls back to the `mh` query param only when the JS bridge does not fire

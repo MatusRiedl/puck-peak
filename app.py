@@ -16,7 +16,6 @@ from nhl.comparison import (
     render_chart_season_picker,
 )
 from nhl.fragments import chart_fragment, detail_tabs_fragment, predictions_fragment
-from nhl.skeletons import chart_skeleton, detail_tabs_skeleton, predictions_skeleton
 from nhl.constants import ACTIVE_TEAMS
 from nhl.controls import render_controls
 from nhl.data_loaders import (
@@ -212,11 +211,14 @@ st.markdown("<div id='main-chart-layout'></div>", unsafe_allow_html=True)
 col_chart, col_stats = st.columns([62, 38], gap="medium")
 
 # =============================================================================
-# Paint phase — create st.empty() slots and inject shimmer skeletons BEFORE
-# any pipeline call. Streamlit streams these deltas to the browser
-# immediately, so the user sees page structure within ~100ms instead of a
-# blank page during cold-cache loads. Real content is mounted into the same
-# slots after the pipeline runs (mount phase, below).
+# Slot phase — create empty st.empty() slots BEFORE any pipeline call so the
+# page structure (layout order of chart, controls, detail tabs, predictions) is
+# fixed up front. The slots stay empty until the mount phase (below) fills them
+# with real content once the pipeline resolves. We intentionally do NOT pre-paint
+# skeleton placeholders: on a full rerun (sidebar click, season picker, page
+# refresh) Streamlit streams the skeleton deltas before the real content, so the
+# user saw an ugly skeleton flash on every interaction. An empty slot produces no
+# visible delta until mounted, so there is no flash.
 # =============================================================================
 with col_chart:
     chart_slot = st.empty()
@@ -227,10 +229,6 @@ with col_stats:
     st.markdown("<div id='comparison-right-rail'></div>", unsafe_allow_html=True)
     predictions_slot = st.empty()
     bridge_slot = st.empty()  # invisible mount point for the matchup-history bridge
-
-chart_slot.html(chart_skeleton())
-detail_slot.html(detail_tabs_skeleton())
-predictions_slot.html(predictions_skeleton())
 
 # Must run before pipeline — produces metric and do_cumul.
 with sub_col2:
@@ -366,12 +364,10 @@ with sub_col1:
     render_chart_season_picker(chart_season_options)
 
 # =============================================================================
-# Mount phase — pipeline has resolved, swap skeletons for real content.
+# Mount phase — pipeline has resolved, fill the empty slots with real content.
 # Each panel is wrapped in an @st.fragment so post-load widget interactions
-# (toggles, season picker) only rerun that scoped block instead of the whole
-# app; skeletons never reappear after the initial paint→fetch→mount pass.
+# (toggles, season picker) only rerun that scoped block instead of the whole app.
 # =============================================================================
-chart_slot.empty()
 with chart_slot.container():
     chart_fragment(
         processed_dfs        = processed_dfs,
@@ -396,7 +392,6 @@ with chart_slot.container():
         suppress_dialogs     = has_pending_matchup_history_dialog_request(matchup_history_trigger_value),
     )
 
-detail_slot.empty()
 with detail_slot.container():
     st.markdown("<div id='comparison-detail-layout'></div>", unsafe_allow_html=True)
     detail_tabs_fragment(
@@ -412,7 +407,6 @@ with detail_slot.container():
         do_cumul        = do_cumul,
     )
 
-predictions_slot.empty()
 with predictions_slot.container():
     predictions_fragment(
         share_params=share_params,
@@ -427,7 +421,7 @@ st.markdown("---")
 # Keep this visible version synced with the newest changelog entry
 st.markdown(
     "<p style='text-align:center;color:gray;font-size:14px;'>"
-    "Created by Iksperial. v1.00.6 -- 11,331 lines of Python<br>"
+    "Created by Iksperial. v1.01.2 -- 11,458 lines of Python<br>"
     "<em>Data is the only religion that strictly punishes you for ignoring it.</em>"
     "</p>",
     unsafe_allow_html=True,

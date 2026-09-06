@@ -105,8 +105,8 @@ def _run_live_cycle() -> None:
         )
 
     _run_safe_task(
-        "get_upcoming_games:8:14",
-        lambda: get_upcoming_games(limit=8, days_ahead=14),
+        "get_upcoming_games:8:60",
+        lambda: get_upcoming_games(limit=8, days_ahead=60),
     )
 
 

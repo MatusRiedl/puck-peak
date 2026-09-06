@@ -306,5 +306,60 @@ class PlayerPipelineLeagueNormalizationTests(unittest.TestCase):
         self.assertIn("Test Skater (Proj)", processed[0]["Player"].tolist())
 
 
+class PlayerPipelineAgeModeZeroGPTests(unittest.TestCase):
+    """Guard the Age-mode rate-stat denominators against GP == 0 buckets."""
+
+    def test_age_bucket_with_zero_gp_yields_nan_not_inf(self):
+        """An age whose GP sums to zero must produce NaN rate stats, never inf.
+
+        The Age-mode branch divides counting stats by the summed GP per age. A
+        bucket with GP == 0 but non-zero counting stats previously produced inf;
+        the zero-guard turns the denominator into NaN so the rate is NaN instead.
+        """
+        raw_df = pd.DataFrame(
+            {
+                "League": ["NHL", "NHL"],
+                "Age": [20, 21],
+                "SeasonYear": [2021, 2022],
+                "GameType": ["Regular", "Regular"],
+                "GP": [0, 80],          # age 20 sums to GP == 0
+                "Points": [5.0, 80.0],  # but still has points -> would be inf pre-fix
+                "Goals": [2.0, 40.0],
+                "Assists": [3.0, 40.0],
+                "PIM": [0.0, 10.0],
+                "+/-": [0.0, 5.0],
+                "Shots": [10.0, 200.0],
+                "TotalTOIMins": [0.0, 1200.0],
+                "Wins": [0.0, 0.0],
+                "Shutouts": [0.0, 0.0],
+                "Saves": [0.0, 0.0],
+                "WeightedSV": [0.0, 0.0],
+                "WeightedGAA": [0.0, 0.0],
+                "NHLeMultiplier": [1.0, 1.0],
+            }
+        )
+
+        with patch("nhl.player_pipeline.get_player_raw_stats", return_value=(raw_df, "Test Skater", "C")):
+            result, *_ = process_players(
+                players={"1": "Test Skater"},
+                metric="PPG",
+                hist_df=pd.DataFrame(),
+                id_to_name_map={},
+                clone_details_map={},
+                season_type="Regular",
+                stat_category="Skater",
+                do_era=False,
+                do_predict=False,
+                do_smooth=False,
+                do_cumul=False,
+                games_mode=False,
+                league_filter=["NHL"],
+            )
+
+        ppg = result[0].set_index("Age")["PPG"]
+        self.assertTrue(pd.isna(ppg.loc[20]))           # guarded: NaN, not inf
+        self.assertAlmostEqual(float(ppg.loc[21]), 1.0)  # normal bucket unaffected
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# Background cache warmer. Defaults to off in nhl/cache_warmer.py so local and
+# test runs stay quiet; production must opt in explicitly or the first visitor
+# after every container restart pays the full cold-fetch cost (~11s on the
+# records.nhl.com all-time table) inside their own page load.
+ENV PUCKPEAK_CACHE_WARMER_ENABLED=1
+
 WORKDIR /app
 
 COPY requirements.txt .

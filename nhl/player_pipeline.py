@@ -145,30 +145,29 @@ def process_players(
         raw_df['BaseName'] = base_name
         raw_dfs_cache.append(raw_df.copy())
 
+        # Normalize the League column once and reuse it for the league filter and
+        # the NHL-only era masks below. Computed as a column so it survives the
+        # row filters and .copy() calls; ignored by the later numeric-only groupby.
+        raw_df['_LeagueNorm'] = raw_df['League'].apply(normalize_league_abbrev)
+
         # --- Step 3: League filter + optional NHLe conversion ---
         if season_mode:
-            raw_df = raw_df[
-                raw_df['League'].apply(normalize_league_abbrev) == 'NHL'
-            ].copy()
+            raw_df = raw_df[raw_df['_LeagueNorm'] == 'NHL'].copy()
         else:
             _selected_norm = {
                 normalize_league_abbrev(_lg)
                 for _lg in _league_filter
                 if normalize_league_abbrev(_lg)
             }
-            raw_df = raw_df[
-                raw_df['League'].apply(normalize_league_abbrev).isin(_selected_norm)
-            ].copy()
+            raw_df = raw_df[raw_df['_LeagueNorm'].isin(_selected_norm)].copy()
         if raw_df.empty:
             continue
         # When Era is on, translate skater scoring from other leagues into a rough
         # NHL-equivalent level before the NHL-only era adjustment runs. With Era off,
         # keep the selected leagues raw.
         if 'NHLeMultiplier' not in raw_df.columns:
-            raw_df['NHLeMultiplier'] = raw_df['League'].apply(
-                lambda _lg: NHLE_MULTIPLIERS.get(
-                    normalize_league_abbrev(_lg), NHLE_DEFAULT_MULTIPLIER
-                )
+            raw_df['NHLeMultiplier'] = raw_df['_LeagueNorm'].map(
+                lambda _norm: NHLE_MULTIPLIERS.get(_norm, NHLE_DEFAULT_MULTIPLIER)
             )
         if do_era and stat_category == "Skater":
             _mult = raw_df['NHLeMultiplier'].fillna(NHLE_DEFAULT_MULTIPLIER)
@@ -187,7 +186,7 @@ def process_players(
             # FIX #4: Adjust Goals and Assists independently, not just Points.
             # Era multipliers derived from NHL GF/GP data; apply to NHL rows only
             # so non-NHL rows are not double-adjusted after the league-normalisation step.
-            _nhl_mask = raw_df['League'].apply(normalize_league_abbrev) == 'NHL'
+            _nhl_mask = raw_df['_LeagueNorm'] == 'NHL'
             if _nhl_mask.any():
                 _era_mults = raw_df.loc[_nhl_mask, 'SeasonYear'].apply(get_era_multiplier)
                 raw_df.loc[_nhl_mask, 'Points']  *= _era_mults.values
@@ -199,7 +198,7 @@ def process_players(
             # Must target WeightedGAA and WeightedSV — the GP-weighted pre-groupby sums —
             # because Save % and GAA don't exist in raw_df until post-groupby.
             # Shutouts adjusted inversely: harder to record in high-scoring eras.
-            _nhl_mask = raw_df['League'].apply(normalize_league_abbrev) == 'NHL'
+            _nhl_mask = raw_df['_LeagueNorm'] == 'NHL'
             if _nhl_mask.any():
                 _era_mults  = raw_df.loc[_nhl_mask, 'SeasonYear'].apply(get_era_multiplier)
                 _sv_offsets = raw_df.loc[_nhl_mask, 'SeasonYear'].apply(get_goalie_era_sv_offset)
@@ -213,6 +212,10 @@ def process_players(
                 raw_df.loc[_nhl_mask, 'Shutouts'] = (
                     raw_df.loc[_nhl_mask, 'Shutouts'] / _era_mults.values
                 )
+
+        # Drop the helper column before the chart-mode branches so it never leaks
+        # into the season-mode game-log frame (which keeps every raw_df column).
+        raw_df = raw_df.drop(columns='_LeagueNorm')
 
         # --- Step 6a: Games Played mode branch ---
         if season_mode:
@@ -316,11 +319,12 @@ def process_players(
             df = raw_df.groupby('Age').sum(numeric_only=True).reset_index()
             df['SeasonYear'] = df['Age'].map(season_year_max)
 
-            df['PPG']    = df['Points'] / df['GP']
-            df['TOI']    = df['TotalTOIMins'] / df['GP']
-            df['SH%']    = (df['Goals'] / df['Shots'] * 100).fillna(0)
-            df['Save %'] = df['WeightedSV'] / df['GP']
-            df['GAA']    = df['WeightedGAA'] / df['GP']
+            gp_denom = df['GP'].replace(0, float('nan'))
+            df['PPG']    = df['Points'] / gp_denom
+            df['TOI']    = df['TotalTOIMins'] / gp_denom
+            df['SH%']    = (df['Goals'] / df['Shots'].replace(0, float('nan')) * 100).fillna(0)
+            df['Save %'] = df['WeightedSV'] / gp_denom
+            df['GAA']    = df['WeightedGAA'] / gp_denom
 
         df['BaseName'] = base_name
         df['Player']   = base_name

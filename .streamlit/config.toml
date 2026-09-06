@@ -1,6 +1,15 @@
 [client]
 showSidebarNavigation = true
 toolbarMode = "minimal"
+# Public site: never render Python tracebacks (file paths, source lines) into the
+# browser on an unhandled exception. Streamlit's default here is "full".
+showErrorDetails = "none"
+
+[server]
+# No hot-reload in a container; the watchdog observer on /app is pure overhead.
+fileWatcherType = "none"
+# Compress the delta stream. Every rerun ships ~75 KB of CSS plus the Plotly figure.
+enableWebsocketCompression = true
 
 [theme]
 base                     = "dark"
