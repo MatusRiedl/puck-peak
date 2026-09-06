@@ -82,7 +82,7 @@ class ComparisonTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("Estimate unavailable.", html)
+        self.assertIn("Estimate available once both teams have played a few games.", html)
         self.assertIn("live-game-card--no-prob", html)
 
     def test_live_game_card_link_html_preserves_shared_params_and_adds_matchup_history_query(self):

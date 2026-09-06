@@ -7,7 +7,7 @@ any other project module, making it safe to import from every other module witho
 risk of circular dependencies.
 """
 
-from datetime import datetime
+from datetime import date
 import re
 import unicodedata
 
@@ -242,12 +242,84 @@ del _lg
 # Dynamic current season year
 # ---------------------------------------------------------------------------
 
-_now = datetime.now()
-CURRENT_SEASON_YEAR: int = _now.year if _now.month >= 9 else _now.year - 1
+SEASON_ROLLOVER_MONTH: int = 9
+"""Calendar month from which a new NHL season year is considered to have begun."""
+
+
+def current_season_year(today: date | None = None) -> int:
+    """Return the start year of the current NHL season (2026 for 2026-27).
+
+    Evaluated on every call rather than at import. A container started in August and
+    left running past the rollover would otherwise serve the previous season for its
+    whole lifetime — silently, since every affected caller would just get stale or
+    empty data rather than an error.
+
+    Args:
+        today: Date to evaluate against. Defaults to the current local date.
+
+    Returns:
+        Four-digit season start year.
+    """
+    day = today or date.today()
+    return day.year if day.month >= SEASON_ROLLOVER_MONTH else day.year - 1
+
+
+def season_year_to_id(season_year: int) -> int:
+    """Convert a season start year into an NHL season id (2026 -> 20262027).
+
+    Args:
+        season_year: Four-digit season start year.
+
+    Returns:
+        Eight-digit NHL season id.
+    """
+    year = int(season_year)
+    return year * 10000 + year + 1
+
+
+def current_season_id(today: date | None = None) -> int:
+    """Return the current NHL season id (e.g. 20262027).
+
+    Args:
+        today: Date to evaluate against. Defaults to the current local date.
+
+    Returns:
+        Eight-digit NHL season id for the current season.
+    """
+    return season_year_to_id(current_season_year(today))
+
+
+def previous_season_year(today: date | None = None) -> int:
+    """Return the start year of the season before the current one.
+
+    Used for offseason fallbacks, where the current season has no games played yet
+    and the most recent complete data belongs to the prior season.
+
+    Args:
+        today: Date to evaluate against. Defaults to the current local date.
+
+    Returns:
+        Four-digit season start year of the previous season.
+    """
+    return current_season_year(today) - 1
+
+
+def _current_season_year_compat() -> int:
+    """Back-compat shim for the old module-level constant.
+
+    Returns:
+        Same value as `current_season_year()`.
+    """
+    return current_season_year()
+
+
+CURRENT_SEASON_YEAR: int = current_season_year()
 """
-Start year of the current NHL season (e.g. 2024 for the 2024-25 season).
-Computed once at import time from the system clock; NHL seasons start in October,
-so January-August still belong to the season that started the prior calendar year.
+Deprecated: start year of the current NHL season, frozen at import time.
+
+Kept only so an unconverted import keeps working. Prefer `current_season_year()`,
+which re-evaluates per call — a long-lived process reading this constant will serve
+the wrong season after the rollover.
 """
 
 # ---------------------------------------------------------------------------

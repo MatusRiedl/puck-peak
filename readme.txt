@@ -48,7 +48,7 @@ and stacked matchup cards. The primary trigger is a small JS bridge mounted thro
 - attempts to start the optional process-local background cache warmer early through `start_background_warmer()`; this is a no-op unless the env flag enables it
 - loads URL params once
 - seeds session state
-- auto-loads a live or recent game once per session when appropriate
+- auto-loads a live, recent, or next-scheduled game once per session when appropriate
 - runs the older session-local `async_preloader.py` warm-up once per session for non-active categories
 - renders sidebar and controls
 - dispatches to `process_players()` or `process_teams()`
@@ -93,7 +93,7 @@ Top level:
 - `ui_state.py` - shared session-state helpers for modal-slot guards
 - `stanley_cup.py` - current-standings / Cup-pick board builder
 - `url_params.py` - compact share-link encode/decode with legacy-link sanitization and canonicalization
-- `schedule.py` - live defaults, upcoming games, featured players, matchup-history loading, and runtime win-prob inference
+- `schedule.py` - live defaults (live > finished > soonest upcoming, preseason included), upcoming games, featured players, matchup-history loading, and runtime win-prob inference
 - `cache_warmer.py` - optional process-local daemon warmer for shared-cache live / seasonal / historical paths
 - `async_preloader.py` - older session-local additive preloader for non-active categories inside the current worker
 
@@ -547,6 +547,10 @@ Key integration notes:
 - `app.py` calls `start_background_warmer()` during startup, but the warmer is disabled unless `PUCKPEAK_CACHE_WARMER_ENABLED` is truthy. The `Dockerfile` sets it to `1` (mirrored in `docker-compose.yml`) so production always warms; it stays off by default for local and test runs. Do not remove it from the image - without the warmer, the first visitor after every container restart pays the cold `fetch_all_time_records` fetch (~11s) inside their own page load.
 - `app.py` still calls `preload_all_categories()` once per session after default seeding; treat that as additive latency smoothing, not the primary cache strategy
 - `schedule.py` only auto-seeds the board on first session load and only if a shared URL did not already populate players or teams
+- `_find_game_from_data()` prefers a live game, then the most recently finished one, then the soonest upcoming game (preseason included). The upcoming pass is what keeps the landing page populated through the offseason - without it the board seeds empty from the Cup final until opening night
+- `get_upcoming_games()` reads `/v1/scoreboard/now` first (~11 days in one request, and it rolls its own window forward to the next games during the offseason) and only walks individual `/v1/score/{date}` days when that came up short. The default window is 60 days, wide enough to span the September gap between the last preseason game and opening night; the old 14-day window returned nothing at all in early September
+- `get_game_win_probabilities()` tries the current season and falls back to the previous one when either team has not yet played `min_games`. Results carry `season_used` and `is_prior_season` so the card can say which season the estimate came from
+- the season is resolved through `current_season_year()` in `nhl/constants.py`, called per use rather than read as an import-time constant. A container started before the September rollover would otherwise serve the previous season for its entire lifetime
 - `comparison.py` stores tab memory per category via `panel_tab_skater`, `panel_tab_goalie`, and `panel_tab_team`
 - `comparison.py` now prefers a JS trigger from `st.components.v2.component()` for prediction-card
   clicks and falls back to the `mh` query param only when the JS bridge does not fire

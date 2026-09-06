@@ -34,9 +34,9 @@ https://nhl-age-curves.streamlit.app/
 
 * **Age Rarity in Season Snapshot:** Historical NHL regular-season age clicks now show percentile, exact rank, optional skater role split, and a compact top-5 leaderboard from the same comparison pool, so fans can see how unusual that season was at that exact age.
 
-* **Upcoming Games Predictions Panel:** A dedicated right-rail panel lists up to the next 8 upcoming games, shows venue, converts puck drop into Central European local time (CET/CEST), and keeps the cards focused on matchup context instead of a quick-add workflow.
+* **Upcoming Games Predictions Panel:** A dedicated right-rail panel lists up to the next 8 upcoming games, shows venue, converts puck drop into Central European local time (CET/CEST), and keeps the cards focused on matchup context instead of a quick-add workflow. Preseason games are included and badged as such, so the panel still has content during the September gap before opening night.
 
-* **Pregame Win Probability:** The right-rail predictions panel also shows a pregame away/home win estimate for each upcoming matchup. The base probability comes from an offline-trained logistic regression on the last 5 completed NHL regular seasons, then a capped goalie Save% proxy is layered on top at runtime.
+* **Pregame Win Probability:** The right-rail predictions panel also shows a pregame away/home win estimate for each upcoming matchup. The base probability comes from an offline-trained logistic regression on the last 5 completed NHL regular seasons, then a capped goalie Save% proxy is layered on top at runtime. Early in a season, before both teams have enough games logged, the estimate falls back to the previous season and the card says so.
 
 * **Matchup History Modal:** Click any prediction card to open a `Matchup History` modal with the last 10 meetings between those two teams, rendered as stacked season-snapshot style matchup cards plus a plain-text win summary so you can see who has taken more of the recent head-to-head without counting manually.
 
@@ -99,7 +99,7 @@ nhl/
     ui_state.py          shared Streamlit session-state guards for modal orchestration
     stanley_cup.py       standings-board and Cup-pick builder
     url_params.py        URL query param encode/decode for shareable links and chart season state
-    schedule.py          live defaults, upcoming games, featured-player helpers, matchup history, and runtime matchup inference
+    schedule.py          live defaults (live > finished > soonest upcoming), upcoming games, featured-player helpers, matchup history, and runtime matchup inference
     async_preloader.py   older session-local category preloader kept as an additive helper
 scraper.py               standalone script to refresh the parquet file, including additive Shots / TotalTOIMins columns
 train_win_prob.py        standalone script to train and export pregame win-probability weights

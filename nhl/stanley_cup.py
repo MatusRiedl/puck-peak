@@ -6,7 +6,7 @@ import math
 
 import pandas as pd
 
-from nhl.constants import ACTIVE_TEAMS
+from nhl.constants import ACTIVE_TEAMS, current_season_year
 from nhl.win_prob import (
     WIN_PROB_FEATURE_LABELS,
     WIN_PROB_FEATURE_ORDER,
@@ -54,7 +54,18 @@ def _mean_or_default(series: pd.Series, default: float) -> float:
 
 
 def _format_generated_at_label(standings_df: pd.DataFrame) -> str:
-    """Format the live-standings timestamp for display."""
+    """Format the live-standings timestamp for display.
+
+    When the table belongs to a season that has already ended - which is what
+    ``/standings/now`` returns for the whole offseason - the label says so instead of
+    calling a finished season "current".
+
+    Args:
+        standings_df: Normalized standings frame.
+
+    Returns:
+        A display label, or an empty string when no timestamp is available.
+    """
     if standings_df.empty or "standingsDateTimeUtc" not in standings_df.columns:
         return ""
 
@@ -65,7 +76,40 @@ def _format_generated_at_label(standings_df: pd.DataFrame) -> str:
     parsed = pd.to_datetime(raw_value, utc=True, errors="coerce")
     if pd.isna(parsed):
         return ""
+
+    season_label = _format_standings_season_label(standings_df)
+    if season_label:
+        return (
+            f"Final {season_label} standings — "
+            f"as of {parsed.strftime('%b %d, %Y %H:%M UTC')}"
+        )
     return f"Current as of {parsed.strftime('%b %d, %Y %H:%M UTC')}"
+
+
+def _format_standings_season_label(standings_df: pd.DataFrame) -> str:
+    """Return a ``2025-26`` style label when the standings are not the live season.
+
+    Args:
+        standings_df: Normalized standings frame carrying a ``seasonId`` column.
+
+    Returns:
+        Season label for a completed season, or an empty string when the table
+        describes the season currently in progress.
+    """
+    if standings_df.empty or "seasonId" not in standings_df.columns:
+        return ""
+
+    try:
+        season_id = int(standings_df["seasonId"].iloc[0] or 0)
+    except (TypeError, ValueError):
+        return ""
+    if not season_id:
+        return ""
+
+    season_year = season_id // 10000
+    if season_year >= current_season_year():
+        return ""
+    return f"{season_year}-{str(season_year + 1)[2:]}"
 
 
 def _build_feature_frame(

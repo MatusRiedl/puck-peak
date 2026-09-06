@@ -93,7 +93,7 @@ class CacheWarmerTests(unittest.TestCase):
 
         mock_game.assert_called_once_with()
         mock_featured.assert_called_once_with("EDM", "DAL")
-        mock_upcoming.assert_called_once_with(limit=8, days_ahead=14)
+        mock_upcoming.assert_called_once_with(limit=8, days_ahead=60)
 
     def test_run_live_cycle_skips_featured_players_when_no_matchup_is_available(self):
         """No featured-player warm-up should run when the live game lookup fails."""

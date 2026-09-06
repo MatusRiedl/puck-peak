@@ -16,7 +16,7 @@ from nhl.api import get_client
 from nhl.cache import get_cache, T1_TTL, T2_DEFAULT_TTL, effective_ttl
 from nhl.constants import (
     ACTIVE_TEAMS,
-    CURRENT_SEASON_YEAR,
+    current_season_year,
     NHLE_DEFAULT_MULTIPLIER,
     NHLE_MULTIPLIERS,
     PLAYER_GAME_LOG_URL,
@@ -247,7 +247,7 @@ def _format_lineage_segment(segment: dict) -> str:
             clean_end_year = None
         if clean_end_year is None:
             end_label = "present"
-        elif clean_end_year >= CURRENT_SEASON_YEAR:
+        elif clean_end_year >= current_season_year():
             end_label = "present"
         elif clean_end_year == int(start_year):
             end_label = ""
@@ -1021,7 +1021,25 @@ def get_current_nhl_standings() -> pd.DataFrame:
     rows = payload.get("standings", []) or []
     standings_timestamp = str(payload.get("standingsDateTimeUtc", "") or "").strip()
 
-    pp_summary = get_team_season_summary(CURRENT_SEASON_YEAR, "Regular")
+    # /standings/now reports the previous season's final table all through the
+    # offseason, so trust the payload's own seasonId rather than assuming it matches
+    # the calendar-derived current season.
+    standings_season_id = 0
+    for row in rows:
+        if isinstance(row, dict) and row.get("seasonId"):
+            try:
+                standings_season_id = int(row["seasonId"])
+            except (TypeError, ValueError):
+                standings_season_id = 0
+            break
+
+    # Pull PP% for the season the standings actually describe. Asking for a season
+    # with no games played returns an empty frame, which used to leave PP% NaN for
+    # all 32 teams and get silently replaced by the league mean downstream.
+    pp_season_year = (
+        standings_season_id // 10000 if standings_season_id else current_season_year()
+    )
+    pp_summary = get_team_season_summary(pp_season_year, "Regular")
     pp_pct_by_team: dict[str, float] = {}
     if not pp_summary.empty and "teamAbbrev" in pp_summary.columns and "PP%" in pp_summary.columns:
         valid_pp = pp_summary[["teamAbbrev", "PP%"]].dropna(subset=["teamAbbrev"])
@@ -1093,6 +1111,7 @@ def get_current_nhl_standings() -> pd.DataFrame:
                 ),
                 "l10PointPctg": (l10_points / (l10_games_played * 2.0)) if l10_games_played > 0 else 0.0,
                 "standingsDateTimeUtc": standings_timestamp,
+                "seasonId": standings_season_id,
                 "PP%": pp_pct_by_team.get(team_abbr, float("nan")),
             }
         )
@@ -1279,7 +1298,7 @@ def _season_year_to_id(season_year: int) -> int | None:
         year = int(season_year)
     except Exception:
         return None
-    if year < 1900 or year > CURRENT_SEASON_YEAR:
+    if year < 1900 or year > current_season_year():
         return None
     return int(f"{year}{year + 1}")
 
@@ -2049,7 +2068,7 @@ def get_player_available_nhl_seasons(player_id: int) -> list[int]:
             season_year = int(season_str[:4])
         except Exception:
             continue
-        if 1900 <= season_year <= CURRENT_SEASON_YEAR:
+        if 1900 <= season_year <= current_season_year():
             seasons.add(season_year)
     return sorted(seasons, reverse=True)
 

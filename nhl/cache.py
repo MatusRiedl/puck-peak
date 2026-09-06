@@ -12,7 +12,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
-from nhl.constants import CURRENT_SEASON_YEAR
+from nhl.constants import current_season_year
 
 log = logging.getLogger("nhl.cache")
 
@@ -33,7 +33,7 @@ def effective_ttl(season_year: int) -> int:
     Many NHL endpoints accept a season year.  Past-season data is immutable
     (T1 / 24 h) while current-season data refreshes hourly (T2 / 1 h).
     """
-    if season_year < CURRENT_SEASON_YEAR:
+    if season_year < current_season_year():
         return T1_TTL
     return T2_DEFAULT_TTL
 

@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 from nhl import schedule
@@ -50,7 +50,11 @@ class ScheduleTests(unittest.TestCase):
         )
 
     def test_extract_upcoming_games_filters_invalid_rows_and_sorts_by_start(self):
-        """Keep only valid future regular-season or playoff games.
+        """Keep future preseason, regular-season and playoff games, sorted by start.
+
+        Preseason (gameType 1) is included on purpose: for most of September it is
+        the only NHL hockey on the calendar, and excluding it left the predictions
+        panel completely empty. Finished games are still dropped.
 
         Args:
             None.
@@ -100,11 +104,14 @@ class ScheduleTests(unittest.TestCase):
 
         upcoming = schedule._extract_upcoming_games(games, now_utc)
 
-        self.assertEqual([game["game_id"] for game in upcoming], [1, 2])
+        # id 3 is FINAL and dropped; ids 1, 4, 2 are future and ordered by start time,
+        # with the preseason game (id 4, gameType 1) kept in its chronological place.
+        self.assertEqual([game["game_id"] for game in upcoming], [1, 4, 2])
         self.assertEqual(upcoming[0]["game_type"], 2)
         self.assertEqual(upcoming[0]["matchup"], "Washington Capitals at Boston Bruins")
         self.assertEqual(upcoming[0]["venue"], "TD Garden")
         self.assertEqual(upcoming[0]["start_label_cest"], "Sat 07 Mar, 18:30 CET")
+        self.assertEqual(upcoming[1]["game_type"], 1)
 
     def test_extract_game_details_from_payload_keeps_score_and_final_label(self):
         """Normalize one finished game into the exact-match dialog shape."""
@@ -628,16 +635,117 @@ class ScheduleMigrationTests(unittest.TestCase):
     @patch("nhl.schedule.get_game_win_probabilities", return_value=None)
     @patch("nhl.schedule.get_client")
     def test_get_upcoming_games_routes_through_nhl_client(self, mock_get_client, _):
-        """Verify per-date score: keys are used."""
+        """Read the scoreboard first, then fall back to per-date score: keys."""
         mock_client = MagicMock()
         mock_client.get.return_value = {"games": []}
         mock_get_client.return_value = mock_client
 
         schedule.get_upcoming_games(limit=1, days_ahead=1)
 
-        self.assertTrue(mock_client.get.call_count >= 1)
-        for call in mock_client.get.call_args_list:
-            self.assertTrue(call.kwargs["cache_key"].startswith("score:"))
+        cache_keys = [call.kwargs["cache_key"] for call in mock_client.get.call_args_list]
+        self.assertTrue(cache_keys)
+        # The multi-day scoreboard is tried first; it covers ~11 days in one request.
+        self.assertEqual(cache_keys[0], "scoreboard")
+        # It returned nothing here, so the per-date walk still runs behind it.
+        self.assertTrue(all(key.startswith("score:") for key in cache_keys[1:]))
+
+    @patch("nhl.schedule.get_game_win_probabilities", return_value=None)
+    @patch("nhl.schedule.get_client")
+    def test_get_upcoming_games_skips_date_walk_when_scoreboard_suffices(
+        self, mock_get_client, _
+    ):
+        """One scoreboard request is enough — do not walk 60 individual dates."""
+        future = (
+            datetime.now(timezone.utc) + timedelta(days=20)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        mock_client = MagicMock()
+        mock_client.get.return_value = {
+            "gamesByDate": [
+                {
+                    "games": [
+                        {
+                            "id": 11,
+                            "gameType": 2,
+                            "gameState": "FUT",
+                            "startTimeUTC": future,
+                            "awayTeam": {"abbrev": "EDM", "name": {"default": "Oilers"}},
+                            "homeTeam": {"abbrev": "DAL", "name": {"default": "Stars"}},
+                            "venue": {"default": "American Airlines Center"},
+                        }
+                    ]
+                }
+            ]
+        }
+        mock_get_client.return_value = mock_client
+
+        games = schedule.get_upcoming_games(limit=1, days_ahead=60)
+
+        self.assertEqual([game["game_id"] for game in games], [11])
+        cache_keys = [call.kwargs["cache_key"] for call in mock_client.get.call_args_list]
+        self.assertEqual(cache_keys, ["scoreboard"])
+
+    def test_find_game_from_data_falls_back_to_soonest_upcoming_game(self):
+        """In the offseason, seed from the next scheduled game rather than nothing.
+
+        Between the Cup final and opening night no payload contains a live or
+        finished game, so without this fallback the landing board seeds empty.
+        """
+        payload = {
+            "gamesByDate": [
+                {
+                    "games": [
+                        {
+                            "id": 20,
+                            "gameType": 2,
+                            "gameState": "FUT",
+                            "startTimeUTC": "2026-10-01T23:00:00Z",
+                            "awayTeam": {"abbrev": "COL"},
+                            "homeTeam": {"abbrev": "VGK"},
+                        },
+                        {
+                            "id": 21,
+                            "gameType": 1,
+                            "gameState": "FUT",
+                            "startTimeUTC": "2026-09-24T23:00:00Z",
+                            "awayTeam": {"abbrev": "BOS"},
+                            "homeTeam": {"abbrev": "PHI"},
+                        },
+                    ]
+                }
+            ]
+        }
+
+        # Soonest first, and preseason counts.
+        self.assertEqual(schedule._find_game_from_data(payload), ("PHI", "BOS"))
+
+    def test_find_game_from_data_still_prefers_finished_over_upcoming(self):
+        """A finished game outranks a scheduled one — the fallback is last resort."""
+        payload = {
+            "gamesByDate": [
+                {
+                    "games": [
+                        {
+                            "id": 30,
+                            "gameType": 2,
+                            "gameState": "FUT",
+                            "startTimeUTC": "2026-10-01T23:00:00Z",
+                            "awayTeam": {"abbrev": "COL"},
+                            "homeTeam": {"abbrev": "VGK"},
+                        },
+                        {
+                            "id": 31,
+                            "gameType": 2,
+                            "gameState": "FINAL",
+                            "startTimeUTC": "2026-09-30T23:00:00Z",
+                            "awayTeam": {"abbrev": "EDM"},
+                            "homeTeam": {"abbrev": "CGY"},
+                        },
+                    ]
+                }
+            ]
+        }
+
+        self.assertEqual(schedule._find_game_from_data(payload), ("CGY", "EDM"))
 
     @patch("nhl.schedule.get_client")
     def test_fetch_club_stats_returns_none_on_failure(self, mock_get_client):
