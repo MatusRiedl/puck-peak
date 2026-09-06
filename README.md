@@ -48,11 +48,12 @@ https://nhl-age-curves.streamlit.app/
 
 * **Player Headshots:** Each active roster entry in the sidebar shows the player's circular headshot thumbnail pulled from the NHL API. Headshots use native `loading="lazy"` inside a shimmer wrapper so a grey circle paints instantly while the image decodes.
 
-* **Scoped Reruns:** The chart, detail tabs, and predictions panel render into `st.empty()` slots created before the pipeline runs, then fill in place once data lands. Each panel is wrapped in `@st.fragment` so post-load widget interactions (toggles, season picker) only rerun that scoped block instead of the whole app.
+* **Scoped Reruns:** The chart, detail tabs, and predictions panel render into `st.empty()` slots created before the pipeline runs, then fill in place once data lands. Each panel is wrapped in `@st.fragment` so post-load widget interactions (toggles, season picker) only rerun that scoped block instead of the whole app. Every JS click bridge is mounted *inside* its own fragment — a bridge mounted at top-level script scope forces a full rerun on every click.
 
 ## Tech Stack
 * **Frontend/Framework:** Streamlit
 * **Data & ML:** Pandas, PyArrow, custom hybrid KNN implementation, offline scikit-learn logistic regression for pregame win probability
+* **Dependencies:** `requirements.txt` is fully pinned. `plotly` must stay on 6.x — Streamlit renders charts with its own bundled plotly.js (3.3.1 for Streamlit 1.54.0), and plotly 7 targets plotly.js 4.0.0.
 * **Visualization:** Plotly
 * **Networking:** Requests plus `NHLClient` for retry, request deduplication, rate limiting, and shared-cache-backed NHL API access
 * **Caching:** Streamlit `@st.cache_data` layered on top of shared `diskcache` for cross-process API result reuse
@@ -96,7 +97,7 @@ nhl/
     chart.py             Plotly chart rendering, share link, JS pan-clamp, and chart click bridge
     comparison.py        Overview/Current Standings detail tabs, chart-season picker helper, clickable predictions panel, and live standings wrapper
     fragments.py         @st.fragment wrappers around the chart, detail tabs, and predictions panel so post-load widget reruns stay scoped
-    ui_state.py          shared Streamlit session-state guards for modal orchestration
+    ui_state.py          session-state helpers plus the one-slot dialog mutex (begin_script_run / begin_dialog_run)
     stanley_cup.py       standings-board and Cup-pick builder
     url_params.py        URL query param encode/decode for shareable links and chart season state
     schedule.py          live defaults (live > finished > soonest upcoming), upcoming games, featured-player helpers, matchup history, and runtime matchup inference

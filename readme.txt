@@ -54,7 +54,7 @@ and stacked matchup cards. The primary trigger is a small JS bridge mounted thro
 - dispatches to `process_players()` or `process_teams()`
 - renders the chart-column `Chart season` picker, the right-rail predictions area, and the comparison panel
 
-`app.py` runs a three-phase render pass: a slot phase that creates empty `st.empty()` slots before any pipeline call (fixing the page layout order without painting any placeholder content), a fetch phase that runs `process_players()` / `process_teams()` synchronously, and a mount phase that calls `slot.empty()` and renders into the same slot through the `@st.fragment`-wrapped helpers in `nhl/fragments.py`. The slots are left empty until mount because pre-painting shimmer skeletons caused a visible flash on every full rerun (sidebar click, season picker, page refresh) - an empty slot produces no delta until it is filled, so there is no flash. The fragments exist so post-load widget interactions only rerun the chart, detail tabs, or predictions panel they sit in.
+`app.py` runs a three-phase render pass: a slot phase that creates empty `st.empty()` slots before any pipeline call (fixing the page layout order without painting any placeholder content), a fetch phase that runs `process_players()` / `process_teams()` synchronously, and a mount phase that renders into the same slot through the `@st.fragment`-wrapped helpers in `nhl/fragments.py`. The slots are left empty until mount because pre-painting shimmer skeletons caused a visible flash on every full rerun (sidebar click, season picker, page refresh) - an empty slot produces no delta until it is filled, so there is no flash. The fragments exist so post-load widget interactions only rerun the chart, detail tabs, or predictions panel they sit in.
 
 SECTION 2 - FILE STRUCTURE
 --------------------------
@@ -68,7 +68,20 @@ Top level:
 - `win_prob_weights.json` - offline-trained logistic-regression artifact used at runtime
 - `.cache/nhl_api/` - shared runtime disk cache directory when `diskcache` is installed
 - `docs/archive/pre_foundation_architecture_overview.md` - archived pre-foundation architecture note; keep it historical
-- `requirements.txt`
+- `requirements.txt` - FULLY PINNED on purpose; see the dependency rule below
+
+DEPENDENCY RULE - do not loosen these pins
+------------------------------------------
+`docker compose build` resolves fresh wheels on every build, so an unpinned entry means
+production runs versions nobody tested. That is exactly how plotly 7.0.0 reached production
+while 6.5.2 was tested locally.
+
+The load-bearing one is plotly. Streamlit renders `st.plotly_chart` with its OWN bundled
+plotly.js (3.3.1 for streamlit 1.54.0, inside `streamlit/static/static/js/`) and only
+serializes the figure on the Python side. plotly 6.5.2 targets plotly.js 3.3.1 - the matched
+pair. plotly 7.x targets 4.0.0 and regenerates its validators and colour handling against that
+schema. Before bumping plotly, compare `plotly.offline.get_plotlyjs_version()` against the
+version string in Streamlit's bundle.
 
 `nhl/` modules:
 - `__init__.py` - package index docstring
@@ -90,7 +103,8 @@ Top level:
 - `chart.py` - Plotly render, baseline overlay, share link, native point-click dispatch, and dialog routing
 - `comparison.py` - Overview / Current Standings tabs, the chart-season picker renderer, clickable predictions panel, and live standings board markup
 - `fragments.py` - `@st.fragment` wrappers around `render_chart`, `render_detail_tabs`, and `render_predictions_panel` so post-load widget interactions stay scoped to one panel
-- `ui_state.py` - shared session-state helpers for modal-slot guards
+- `ui_state.py` - session-state helpers plus the one-slot dialog mutex (`begin_script_run()`,
+  `begin_dialog_run(scope)`); see the DIALOG SLOT rules in SECTION 4
 - `stanley_cup.py` - current-standings / Cup-pick board builder
 - `url_params.py` - compact share-link encode/decode with legacy-link sanitization and canonicalization
 - `schedule.py` - live defaults (live > finished > soonest upcoming, preseason included), upcoming games, featured players, matchup-history loading, and runtime win-prob inference
@@ -186,11 +200,44 @@ One-shot guards:
 - `_url_loaded`
 - `_default_loaded`
 - `_preloaded`
-- `_dialog_opened_this_run`
+- `_dialog_opened_this_run`   (see "DIALOG SLOT" below - do not set this by hand)
+- `_dialog_run_token`         (bumped once per full script run)
+- `_dialog_scope_token_*`     (one per fragment: chart, detail_tabs, predictions)
 - `_pending_matchup_history`
 - `_last_matchup_history_trigger_nonce`
 - `_last_identity_card_trigger_nonce`
 - `_last_handled_chart_click_nonce`
+
+DIALOG SLOT - read this before changing anything that opens a dialog
+--------------------------------------------------------------------
+Only one `st.dialog` may open per rerun, so `nhl/ui_state.py` keeps a one-slot mutex in
+`_dialog_opened_this_run`. Six call sites take the slot with `mark_dialog_opened_this_run()`.
+Releasing it is the part that is easy to get wrong.
+
+Rules:
+- `app.py` calls `begin_script_run()` once per full script run. That clears the slot and bumps
+  `_dialog_run_token`.
+- Every `@st.fragment` wrapper in `nhl/fragments.py` calls `begin_dialog_run("<scope>")` at its
+  top. That clears the slot ONLY when this scope has already run under the current token - i.e.
+  only on a genuine fragment-scoped rerun.
+- Never assign `_dialog_opened_this_run` directly, in app code or in tests.
+
+Why it is shaped that way (both failure modes are real, one shipped):
+- Resetting only in `app.py` is what caused the outage: a fragment rerun never re-executes
+  top-level `app.py`, and the Player Details / Team Details / Matchup History dialogs use the
+  default `on_dismiss="ignore"` so closing them reruns nothing either. The flag latched True and
+  every later dialog was silently swallowed - chart clicks and player cards alike.
+- Resetting unconditionally in every fragment is wrong the other way: on a full run all three
+  fragments execute in sequence, so a later one would clear a reservation an earlier one had
+  already taken and two dialogs would try to open in one run.
+The run-token check is what satisfies both. `tests/test_dialog_run_scope.py` pins the behaviour.
+
+Related gate-ordering rule: check the gates BEFORE recording a click nonce as handled, or a
+blocked click is destroyed instead of retried. One deliberate exception - in
+`_show_chart_dialog_from_trigger()` a click blocked by `suppress_dialogs` DOES burn its nonce,
+because that is intentional arbitration (a matchup dialog is taking the run) and the bridge's
+trigger value survives reruns; leaving it unburned would pop the chart dialog open on the next
+rerun out of nowhere. A merely busy slot is transient and must not consume the click.
 
 Season-mode memory:
 - `_pre_season_chart_x_axis_mode`
@@ -335,6 +382,19 @@ Visual rules:
 - projection = dotted player-colored line with open markers
 - baseline = dashed white semi-transparent line with tiny markers
 
+JS listener rule - the chart div OUTLIVES the script that decorates it:
+- `chart_key` is stable across reruns, so Streamlit keeps the same `.js-plotly-plot` DOM node
+  while the `components.html()` script block re-executes on every iframe (re)load.
+- Any `plot.on(...)` or `parent.addEventListener(...)` therefore MUST be idempotent, or listeners
+  stack one layer per rerun until the chart crawls. This shipped once: an unguarded
+  `plotly_relayout` bind made the chart progressively unresponsive after a few dialog cycles.
+- Guards in place: `plot.__nhlRelayoutClampBound`, `parent.__nhlChartResizeBound`,
+  `targetPlot._hoverRectObserver`, and `plot.__nhlChartClickBridgeInstanceId` in the click bridge.
+  Follow that pattern for anything new.
+- `Plotly.relayout` is ASYNC. A re-entrancy flag cleared on the same synchronous tick is already
+  false by the time the resulting `plotly_relayout` event fires and guards nothing - clear it in
+  the promise callback instead. `guardedRelayout()` does this correctly; copy it.
+
 Chart duties handled in `chart.py`:
 - concatenate processed frames
 - add baseline overlays when enabled
@@ -458,9 +518,18 @@ Matchup-history runtime rules:
 - the modal shows the latest 10 meetings across regular season and playoffs, newest first
 - `comparison.py` mounts a JS click bridge with `st.components.v2.component()` and intercepts
   prediction-card clicks before navigation so the modal feels in-app instead of like a full refresh
-- `app.py` pre-mounts that bridge once before the chart render; the predictions rail receives both
-  the latest payload and an explicit "already mounted" flag so Streamlit never mounts the same
-  bridge key twice in one rerun
+- GOTCHA: that bridge MUST be mounted inside `predictions_fragment`, never at top-level `app.py`
+  scope. Streamlit scopes a rerun to a fragment only when the widget that changed belongs to that
+  fragment, so a top-level mount made every prediction-card click trigger a FULL script rerun -
+  the only click on the page that did, since the chart and identity bridges are fragment-scoped.
+  `render_predictions_panel()` mounts it itself; the `matchup_history_bridge_mounted` flag exists
+  so a caller that already mounted it can say so and avoid a duplicate key.
+- GOTCHA: the prediction-card overlay must NOT carry an `href`. It is absolutely positioned over
+  the whole card (card content is `pointer-events: none`), so every click lands on it. With an
+  href, any click arriving before the bridge listener attached followed it as a real document
+  navigation - tearing down the websocket and starting a fresh session, which looked like "the
+  page re-rendered itself". It is now `role="button" tabindex="0"` and the bridge handles
+  Enter/Space. `_build_live_game_card_href()` still exists, but only for shareable deep links.
 - the old `mh=AWY,HOME` query-param contract remains as a no-JS fallback
 - `dialog.show_matchup_history()` adds a plain-text summary of wins by each team above the cards
 
@@ -556,8 +625,10 @@ Key integration notes:
   clicks and falls back to the `mh` query param only when the JS bridge does not fire
 - `chart.py` uses Streamlit's native `on_select="rerun"` for point clicks; `comparison.py` keeps
   the prediction-card and identity-card bridges on the `st.components.v2.component()` pattern
-- `comparison.py` and `chart.py` still share a per-rerun dialog guard through `ui_state.py` so
-  chart dialogs, player-card dialogs, and matchup-history dialogs do not collide in one rerun
+- `comparison.py` and `chart.py` share a per-rerun dialog guard through `ui_state.py` so chart
+  dialogs, player-card dialogs, and matchup-history dialogs do not collide in one rerun. READ THE
+  "DIALOG SLOT" RULES in SECTION 4 before touching anything that opens a dialog - the guard is subtle and
+  it has already caused one production outage
 - `comparison.py` renders the predictions rail, but `app.py` owns the visible placement of the
   chart-season picker above the main chart
 - Team all-time cards and team season discovery must use franchise lineage (`TEAM_LINEAGES` /

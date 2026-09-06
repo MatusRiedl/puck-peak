@@ -116,7 +116,12 @@ def is_dialog_opened_this_run() -> bool:
 
 
 def mark_dialog_opened_this_run() -> None:
-    """Reserve the single-dialog slot for the current rerun."""
+    """Reserve the single-dialog slot for the current rerun.
+
+    Call this immediately after opening an `st.dialog`. Streamlit allows only one dialog
+    per run, so the reservation stops a second call site opening another one. The slot is
+    released by `begin_script_run()` / `begin_dialog_run()`, never by hand.
+    """
     session_state_set(DIALOG_OPENED_THIS_RUN_SESSION_KEY, True)
 
 

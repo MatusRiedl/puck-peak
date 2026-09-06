@@ -1423,7 +1423,23 @@ def _build_live_game_card_href(game: dict, share_params: dict | None = None) -> 
 
 
 def _build_live_game_card_link_html(game: dict, share_params: dict | None = None) -> str:
-    """Wrap one prediction card in a full-card history link."""
+    """Wrap one prediction card in a full-card click target for matchup history.
+
+    The overlay is deliberately href-less. It is absolutely positioned across the whole
+    card (card content is `pointer-events: none`), so every click lands on it — and with
+    an href, any click arriving before the JS bridge attached its listener followed the
+    link as a real document navigation, tearing down the websocket and restarting the
+    session. `role="button"` plus `tabindex` keep it focusable and announced; the bridge
+    handles click, Enter and Space.
+
+    Args:
+        game: Normalized upcoming-game dict.
+        share_params: Current app state, unused for the overlay itself and kept for
+            signature compatibility with the shareable-link builder.
+
+    Returns:
+        HTML for one card wrapped in its click-target shell.
+    """
     away_abbr = str(game.get("away_abbr", "") or "").strip().upper()
     home_abbr = str(game.get("home_abbr", "") or "").strip().upper()
     away_name = str(game.get("away_name", "") or game.get("away_abbr", "") or "").strip()
