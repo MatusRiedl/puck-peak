@@ -89,7 +89,7 @@ nhl/
     data_loaders.py      cached API fetch, season discovery, game-log, and parquet loaders
     rarity.py            age-rarity percentile/rank engine plus top-season leaderboard payloads
     baselines.py         aggregate historical baseline builders
-    knn_engine.py        hybrid KNN projection engine
+    knn_engine.py        hybrid KNN projection engine, memoized per player/metric/toggle set
     win_prob.py          shared pregame win-probability feature engineering and runtime scoring
     player_pipeline.py   full per-player pipeline, including single-season game-log mode
     team_pipeline.py     team comparison pipeline

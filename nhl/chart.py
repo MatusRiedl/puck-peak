@@ -105,6 +105,11 @@ LAST_HANDLED_CHART_CLICK_NONCE_SESSION_KEY = "_last_handled_chart_click_nonce"
 LAST_HANDLED_NATIVE_SELECTION_SESSION_KEY = "_last_handled_native_chart_selection"
 CHART_CLICK_BRIDGE_BIND_ATTEMPTS = 20
 CHART_CLICK_BRIDGE_BIND_DELAY_MS = 150
+#: Constant `key=` for st.plotly_chart. Streamlit hashes the whole figure spec into
+#: the element id and the frontend uses that id as the React key, so a constant here
+#: means the chart remounts exactly when the figure changes and never otherwise.
+#: Only one chart renders per run, so a fixed key cannot collide.
+CHART_WIDGET_KEY = "puckpeak_main_chart"
 CHART_HOVER_DISTANCE = 32
 MOBILE_TOUCH_BREAKPOINT_PX = 768
 CHART_CLICK_BRIDGE_JS = f"""
@@ -606,6 +611,62 @@ def _mount_chart_click_bridge(chart_instance_id: str) -> str | None:
         on_clicked_change=_noop_chart_click_change,
     )
     return getattr(result, "clicked", None)
+
+
+def _build_chart_instance_id(
+    board_identity: str,
+    team_mode: bool,
+    metric: str,
+    stat_category: str,
+    season_type: str,
+    selected_season,
+) -> str:
+    """Build the identity of the currently plotted chart, for the JS click bridge.
+
+    This is NOT the `st.plotly_chart` key — see `CHART_WIDGET_KEY`. It answers a
+    different question: "is this click payload about the chart on screen right now?"
+    So it must change whenever the figure is reshaped, and must NOT change on
+    sidebar widget state, which leaves the figure byte-identical.
+
+    Every view toggle is folded in deliberately. The old key omitted `do_era`,
+    `do_cumul`, `do_base`, `do_prime`, `league_filter` and (in player mode)
+    `season_type`, so toggling any of those replaced the `.js-plotly-plot` node
+    while the bridge's `data` prop stayed equal — the component's effect never
+    re-ran and the `plotly_click` handler went silently missing. Masked until now
+    only because the native `on_select` path is tried first.
+
+    Args:
+        board_identity: Stable string for the plotted board (teams dict or names).
+        team_mode: Whether the team pipeline produced the figure.
+        metric: Active metric column.
+        stat_category: Skater, Goalie, or Team.
+        season_type: Regular or Playoffs.
+        selected_season: Chart season, or "All" for whole-career mode.
+
+    Returns:
+        str: Short, process-stable identity string.
+    """
+    parts = [
+        "team" if team_mode else "player",
+        board_identity,
+        str(metric),
+        str(stat_category),
+        str(season_type),
+        str(selected_season),
+        str(session_state_get("x_axis_mode", "")),
+        str(session_state_get("league_filter", "")),
+        str(bool(session_state_get("do_smooth", False))),
+        str(bool(session_state_get("do_predict", False))),
+        str(bool(session_state_get("do_era", False))),
+        str(bool(session_state_get("do_cumul_toggle", False))),
+        str(bool(session_state_get("do_base", False))),
+        str(bool(session_state_get("do_prime", False))),
+    ]
+    # sha1 rather than hash(): Python salts string hashing per process, and this
+    # value is interpolated into the chart's iframe srcdoc and its DOM ids, which
+    # should be reproducible across restarts.
+    digest = hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
+    return f"chart_{digest}"
 
 
 def _parse_chart_click_trigger(value, expected_chart_instance_id: str) -> dict | None:
@@ -1597,8 +1658,12 @@ def render_chart(
         raw_dfs_cache: Raw player dataframes used by Season Snapshot dialogs.
         ml_clones_dict: Cached projection clone payloads for dialogs.
         season_type: Active season scope (`Regular`, `Playoffs`, `Both`).
-        sidebar_keys: Sidebar cache-busting values that feed the chart widget
-            key so the JS click bridge stays aligned with the visible board.
+        sidebar_keys: Sidebar widget values (search box, roster pickers). Accepted
+            for signature stability and DELIBERATELY UNUSED. These once fed the
+            chart widget key, which meant typing in the search box remounted the
+            chart and reloaded its 22 KB JS iframe while the figure was
+            byte-identical. Never put them back into `chart_key` or
+            `chart_instance_id` — neither identity may depend on sidebar state.
         peak_info: Optional player peak-highlight payloads.
         do_prime: Whether prime-year highlighting is enabled.
         do_era: Whether era adjustment is active for the visible metric.
@@ -1750,28 +1815,37 @@ def render_chart(
     is_clickable_age_chart = not team_mode and not games_mode
 
     # ------------------------------------------------------------------
-    # Chart widget key.
-    # Keep the key stable for the visible board state so the JS click bridge
-    # can use the same chart identity for nonce-tagged click payloads.
+    # Chart identity. Two DIFFERENT things, deliberately kept apart — they used
+    # to be one string and that conflation cost a gratuitous remount on every
+    # keystroke in the sidebar search box. See readme.txt SECTION 9.
     # ------------------------------------------------------------------
+    # 1. CHART_WIDGET_KEY (module constant) is what st.plotly_chart gets as key=.
+    #    Streamlit hashes the FULL figure spec into the element id regardless of
+    #    the key (plotly_chart.py: key_as_main_identity=False), and the frontend
+    #    uses that id as the chart's React key. So a constant key gives exactly
+    #    the semantics we want: the chart remounts if and only if the figure
+    #    actually changed. Anything varying in the key that does not change the
+    #    figure is a pure remount for nothing.
+    #
+    # 2. chart_instance_id identifies the PLOTTED DATA, for the JS click bridge.
+    #    It backs the staleness guard in _parse_chart_click_trigger (a click
+    #    emitted against an older board must not replay against a new one) and
+    #    the JS rebind guard. It must therefore track everything that reshapes
+    #    the figure, and must NOT track sidebar widget state: typing a search
+    #    term or browsing another team's roster leaves the figure byte-identical.
     if team_mode:
-        chart_key = (
-            f"chart_team_{hash(str(st.session_state.teams))}"
-            f"_{metric}_{st.session_state.do_smooth}_{st.session_state.x_axis_mode}"
-            f"_{selected_season}_{season_type}"
-        )
+        _board_identity = str(st.session_state.teams)
     else:
-        player_names = [df['BaseName'].iloc[0] for df in processed_dfs if not df.empty]
-        chart_key = (
-            f"chart_{hash(str(player_names))}"
-            f"_{metric}_{st.session_state.do_predict}_{st.session_state.do_smooth}"
-            f"_{sidebar_keys.get('search_term', '')}"
-            f"_{sidebar_keys.get('top_selected', '')}"
-            f"_{sidebar_keys.get('team_abbr', '')}"
-            f"_{sidebar_keys.get('roster_player', '')}"
-            f"_{st.session_state.x_axis_mode}"
-            f"_{selected_season}"
-        )
+        _board_identity = str([df['BaseName'].iloc[0] for df in processed_dfs if not df.empty])
+
+    chart_instance_id = _build_chart_instance_id(
+        board_identity  = _board_identity,
+        team_mode       = team_mode,
+        metric          = metric,
+        stat_category   = stat_category,
+        season_type     = season_type,
+        selected_season = selected_season,
+    )
 
     # ------------------------------------------------------------------
     # Data bounds for axis range constraints and JS pan clamping
@@ -2131,8 +2205,8 @@ def render_chart(
     if not team_mode:
         fig.update_traces(showlegend=False)
 
-    share_button_id = f"nhl-share-btn-{abs(hash(chart_key))}"
-    toolbar_id = f"nhl-chart-toolbar-{abs(hash(chart_key))}"
+    share_button_id = f"nhl-share-btn-{chart_instance_id}"
+    toolbar_id = f"nhl-chart-toolbar-{chart_instance_id}"
     glow_style = _build_chart_glow_style(player_colors)
     st.markdown(
         _build_chart_toolbar_markup(chart_header, share_button_id, toolbar_id) + glow_style,
@@ -2178,12 +2252,12 @@ def render_chart(
     _native_selection = st.plotly_chart(
         fig,
         width           = "stretch",
-        key             = chart_key,
+        key             = CHART_WIDGET_KEY,
         config          = plotly_config,
         on_select       = "rerun",
         selection_mode  = "points",
     )
-    chart_click_trigger_value = _mount_chart_click_bridge(chart_key)
+    chart_click_trigger_value = _mount_chart_click_bridge(chart_instance_id)
 
     # ------------------------------------------------------------------
     # JS: responsive dtick + pan/zoom clamping
@@ -2194,7 +2268,7 @@ def render_chart(
     _share_params_json = json.dumps(share_params or {})
     _share_button_id_json = json.dumps(share_button_id)
     _toolbar_id_json = json.dumps(toolbar_id)
-    _chart_instance_id_json = json.dumps(chart_key)
+    _chart_instance_id_json = json.dumps(chart_instance_id)
     _enable_player_trace_toggles = "true"
 
     components.html(f"""<script>
@@ -2744,7 +2818,7 @@ def render_chart(
     if not _native_dialog_opened:
         _show_chart_dialog_from_trigger(
             chart_click_trigger_value,
-            chart_key,
+            chart_instance_id,
             suppress_dialogs=suppress_dialogs,
             team_mode=team_mode,
             games_mode=games_mode,

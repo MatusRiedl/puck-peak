@@ -121,12 +121,34 @@ class SidebarTests(unittest.TestCase):
         self.assertLess(page_config_index, inject_index)
         self.assertLess(inject_index, mobile_fix_index)
 
-    def test_sidebar_team_remove_mutates_session_state_inline(self):
-        """Keep team removal on the current inline session-state path."""
+    def test_board_removal_clears_one_row_instead_of_rerunning(self):
+        """Removing from the board must cost one script run, not two.
+
+        The handlers used to delete and immediately st.rerun(), which aborted the
+        script before the pipeline and made every ✖ a double run. The rerun only
+        existed to erase the row the loop had already painted; a per-row st.empty()
+        does that directly, and app.py does not read the board until after
+        render_sidebar() so the delete lands in the same run.
+        """
         sidebar_text = (Path(__file__).resolve().parents[1] / "nhl" / "sidebar.py").read_text(encoding="utf-8")
 
         self.assertIn('del st.session_state.teams[_abbr]', sidebar_text)
-        self.assertIn("st.rerun()", sidebar_text)
+        self.assertIn('del st.session_state.players[pid]', sidebar_text)
+
+        # Both board loops wrap each row in its own slot, and each delete is paired
+        # with a clear of exactly that slot.
+        self.assertEqual(sidebar_text.count("row = st.empty()"), 2)
+        self.assertEqual(sidebar_text.count("remove_clicked = st.button("), 2)
+        self.assertIn("del st.session_state.players[pid]\n                row.empty()", sidebar_text)
+        self.assertIn("del st.session_state.teams[_abbr]\n                row.empty()", sidebar_text)
+
+        # No rerun anywhere in the sidebar: it can no longer interrupt the script.
+        # Comment lines are stripped first — the comments above explain the removed
+        # st.rerun() by name and would otherwise match.
+        code_lines = [
+            line for line in sidebar_text.splitlines() if not line.lstrip().startswith("#")
+        ]
+        self.assertNotIn("st.rerun()", "\n".join(code_lines))
         self.assertNotIn("from nhl.selection import remove_selected_player, remove_selected_team", sidebar_text)
 
     def test_sidebar_escapes_shared_link_names_before_injecting_html(self):

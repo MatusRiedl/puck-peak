@@ -98,6 +98,30 @@ class StylesTests(unittest.TestCase):
         # "initial" must stay excluded so the cold load keeps its own loading state.
         self.assertNotIn('[data-test-script-state="initial"]', css_text)
 
+    def test_controls_row_stays_clickable_above_its_overlapping_neighbours(self):
+        """The Metric Selections row must win hit-testing against both neighbours.
+
+        The detail stack is pulled up -3.7rem so its tab block overflows onto the
+        bottom of this row, and Plotly's positioned .svg-container covers the top
+        few px. Both are later siblings, so without a positioned context here the
+        button only responds on its upper third.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        css_text = get_app_css_text()
+
+        row_index = css_text.index('[data-testid="stHorizontalBlock"]:has(#comparison-season-filter) {')
+        rule = css_text[row_index: css_text.index("}", row_index)]
+
+        self.assertIn("position: relative", rule)
+        self.assertIn("z-index:", rule)
+        # The overlap this guards against must still be the reason it is needed.
+        self.assertIn("div.element-container:has(#comparison-detail-layout)", css_text)
+
     def test_critical_inline_css_covers_first_paint_chrome(self):
         """Keep the anti-FOUC block small but complete.
 

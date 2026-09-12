@@ -1492,6 +1492,95 @@ class ChartTests(unittest.TestCase):
 
         self.assertEqual(mock_show_season_details.call_count, 2)
 
+    def test_chart_widget_key_is_constant_and_ignores_sidebar_state(self):
+        """The plotly key must not vary with anything but the figure itself.
+
+        Streamlit hashes the whole figure spec into the element id and the frontend
+        uses that id as the chart's React key, so a key that moves when the figure
+        does not is a pure remount. `sidebar_keys` used to be folded in, which made
+        every keystroke in the search box tear down the chart.
+        """
+        chart_text = (Path(__file__).resolve().parents[1] / "nhl" / "chart.py").read_text(encoding="utf-8")
+
+        self.assertIn('CHART_WIDGET_KEY = "puckpeak_main_chart"', chart_text)
+        self.assertIn("key             = CHART_WIDGET_KEY,", chart_text)
+
+        # sidebar_keys survives only as an accepted-and-ignored parameter.
+        for sidebar_key in ("search_term", "top_selected", "team_abbr", "roster_player"):
+            self.assertNotIn(f'sidebar_keys.get(\'{sidebar_key}\'', chart_text)
+            self.assertNotIn(f'sidebar_keys.get("{sidebar_key}"', chart_text)
+
+    def test_chart_instance_id_tracks_every_input_that_reshapes_the_figure(self):
+        """The bridge identity must change with the figure and only with the figure.
+
+        The old key omitted do_era / do_cumul / do_base / do_prime / league_filter /
+        season_type, so toggling any of them replaced the plot DOM node while the
+        bridge's data prop stayed equal: the component never re-ran and the click
+        handler went missing.
+        """
+        base_state = {
+            "x_axis_mode": "Age",
+            "league_filter": ["NHL"],
+            "do_smooth": False,
+            "do_predict": True,
+            "do_era": False,
+            "do_cumul_toggle": False,
+            "do_base": True,
+            "do_prime": True,
+        }
+        base_args = dict(
+            board_identity="['Connor McDavid']",
+            team_mode=False,
+            metric="Points",
+            stat_category="Skater",
+            season_type="Regular",
+            selected_season="All",
+        )
+
+        def build(state_overrides=None, arg_overrides=None):
+            state = {**base_state, **(state_overrides or {})}
+            with patch.object(chart_module.st, "session_state", SimpleNamespace(**state), create=True):
+                return chart_module._build_chart_instance_id(**{**base_args, **(arg_overrides or {})})
+
+        baseline = build()
+        self.assertTrue(baseline.startswith("chart_"))
+        self.assertEqual(baseline, build(), "identity must be stable for identical inputs")
+
+        for key, changed in (
+            ("do_era", True),
+            ("do_cumul_toggle", True),
+            ("do_base", False),
+            ("do_prime", False),
+            ("do_smooth", True),
+            ("do_predict", False),
+            ("x_axis_mode", "Games Played"),
+            ("league_filter", ["NHL", "AHL"]),
+        ):
+            self.assertNotEqual(baseline, build({key: changed}), f"{key} must change the identity")
+
+        for key, changed in (
+            ("metric", "Goals"),
+            ("season_type", "Playoffs"),
+            ("selected_season", 2024),
+            ("stat_category", "Goalie"),
+            ("board_identity", "['Sidney Crosby']"),
+            ("team_mode", True),
+        ):
+            self.assertNotEqual(baseline, build(None, {key: changed}), f"{key} must change the identity")
+
+    def test_chart_instance_id_is_stable_across_processes(self):
+        """DOM ids derived from it are interpolated into the iframe srcdoc.
+
+        Python salts str hashing per process, so the previous abs(hash(...)) ids
+        differed on every restart.
+        """
+        chart_text = (Path(__file__).resolve().parents[1] / "nhl" / "chart.py").read_text(encoding="utf-8")
+
+        self.assertIn("hashlib.sha1(", chart_text)
+        self.assertNotIn("abs(hash(chart_key))", chart_text)
+        self.assertIn('share_button_id = f"nhl-share-btn-{chart_instance_id}"', chart_text)
+        self.assertIn('toolbar_id = f"nhl-chart-toolbar-{chart_instance_id}"', chart_text)
+
     def test_mount_chart_click_bridge_uses_stable_key_and_payload(self):
         """Mount the chart click bridge with one stable key and chart id payload."""
         fake_result = SimpleNamespace(clicked=None)
@@ -1853,7 +1942,7 @@ class ChartTests(unittest.TestCase):
         self.assertIn("'xaxis.tickfont.size': axisTickFontSize,", chart_text)
         self.assertIn("'yaxis.tickfont.size': yAxisTickFontSize,", chart_text)
         self.assertIn("'xaxis.tickfont.size': calcResponsiveAxisTickFontSize(width),", chart_text)
-        self.assertIn("chart_click_trigger_value = _mount_chart_click_bridge(chart_key)", chart_text)
+        self.assertIn("chart_click_trigger_value = _mount_chart_click_bridge(chart_instance_id)", chart_text)
         self.assertIn("_show_chart_dialog_from_trigger(", chart_text)
         self.assertNotIn('clickmode   = \'event+select\'', chart_text)
 

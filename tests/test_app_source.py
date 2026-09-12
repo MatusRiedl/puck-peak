@@ -94,6 +94,28 @@ class AppSourceTests(unittest.TestCase):
         self.assertNotIn("show_app_guide", sidebar_text)
         self.assertNotIn('key="open_app_guide_sidebar"', sidebar_text)
 
+    def test_render_slots_are_containers_not_empties(self):
+        """The three render slots must not be st.empty().
+
+        An Empty delta is not inert: the frontend renders it as a bare
+        <div data-testid="stEmpty">, so re-emitting one each run took the node at
+        that path from Block back to Empty and React tore the subtree down. The
+        chart, tabs and right rail then sat blank for the whole pipeline before
+        popping back at mount. A container reconciles instead, keeping the previous
+        content on screen until the new content replaces it.
+        """
+        app_text = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+
+        for slot in ("chart_slot", "detail_slot", "predictions_slot"):
+            self.assertIn(f"{slot} = st.container()", app_text)
+            self.assertNotIn(f"{slot} = st.empty()", app_text)
+            self.assertIn(f"with {slot}:", app_text)
+            self.assertNotIn(f"with {slot}.container():", app_text)
+
+        # No slot is reserved with st.empty() any more. Matched on the assignment
+        # form so the prose in the comments above does not trip this.
+        self.assertNotIn("= st.empty()", app_text)
+
     def test_app_imports_and_starts_background_cache_warmer(self):
         """Start the optional cache warmer during app startup."""
         app_text = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")

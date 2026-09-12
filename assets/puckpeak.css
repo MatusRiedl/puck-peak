@@ -1322,9 +1322,18 @@ div:has(> #comparison-controls-panel) + div [data-testid="stExpander"] details s
         margin-top: -1.5rem !important;
     }
 }
-/* DESKTOP — Whole career / Metric Selections row: negative pull closes gap below chart */
+/* DESKTOP — Whole career / Metric Selections row: negative pull closes gap below chart.
+   position/z-index are what keep this row CLICKABLE, and they are load-bearing.
+   Two later-painting neighbours overlap it: the detail stack is pulled up -3.7rem
+   (see #comparison-detail-layout below) so the tab block overflows onto the bottom of
+   this row, and Plotly's .svg-container is position: relative with a pointer-events
+   drag layer that covers the top few px. Both are later siblings, so without a
+   positioned context here they win hit-testing and the Metric Selections button only
+   responds on its upper third. This does not move anything visually. */
 [data-testid="stHorizontalBlock"]:has(#comparison-season-filter) {
     margin-top: -2.4rem !important;
+    position: relative;
+    z-index: 3;
 }
 /* MOBILE — Whole career / Metric Selections row: stronger pull + removes side padding */
 @media (max-width: 768px) {

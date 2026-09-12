@@ -591,28 +591,39 @@ def _render_player_sidebar() -> dict:
 
     st.markdown("---")
     if st.session_state.players:
+        # Each row gets its own st.empty() so a removal can clear just that row.
+        # This is what lets the handler below skip st.rerun(): the old code deleted
+        # the player and immediately reran, which aborted the script before the
+        # pipeline and cost a second full run for every ✖. The rerun was only ever
+        # needed to erase the row the loop had already painted, and row.empty()
+        # does that directly. st.session_state.players is not read until app.py's
+        # `active_players`, well after render_sidebar(), so the delete alone is
+        # picked up by the pipeline in this same run.
         for pid, name in list(st.session_state.players.items()):
-            c_name, c_btn = st.columns([8, 1], vertical_alignment="center", gap="small")
-            with c_name:
-                headshot = get_player_headshot(pid)
-                safe_name = escape(str(name or ""))
-                img_html = (
-                    f"<span class='pp-skel-headshot-wrap'>"
-                    f"<img src='{headshot}' loading='lazy' decoding='async' alt='{safe_name}'>"
-                    f"</span>"
-                    if headshot else ""
-                )
-                st.markdown(
-                    f"<div style='display:flex;align-items:center;gap:8px;margin:0;'>"
-                    f"{img_html}"
-                    f"<div class='player-name'>{safe_name}</div>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-            with c_btn:
-                if st.button("✖", key=f"drop_{pid}", type="secondary"):
-                    del st.session_state.players[pid]
-                    st.rerun()
+            row = st.empty()
+            with row.container():
+                c_name, c_btn = st.columns([8, 1], vertical_alignment="center", gap="small")
+                with c_name:
+                    headshot = get_player_headshot(pid)
+                    safe_name = escape(str(name or ""))
+                    img_html = (
+                        f"<span class='pp-skel-headshot-wrap'>"
+                        f"<img src='{headshot}' loading='lazy' decoding='async' alt='{safe_name}'>"
+                        f"</span>"
+                        if headshot else ""
+                    )
+                    st.markdown(
+                        f"<div style='display:flex;align-items:center;gap:8px;margin:0;'>"
+                        f"{img_html}"
+                        f"<div class='player-name'>{safe_name}</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                with c_btn:
+                    remove_clicked = st.button("✖", key=f"drop_{pid}", type="secondary")
+            if remove_clicked:
+                del st.session_state.players[pid]
+                row.empty()
     else:
         st.info("Board is empty")
 
@@ -681,23 +692,28 @@ def _render_team_sidebar() -> dict:
     st.markdown("---")
 
     if st.session_state.teams:
+        # Same per-row slot pattern as the player board — see the comment there for
+        # why this replaces the old delete-then-st.rerun() pair.
         for _abbr, _name in list(st.session_state.teams.items()):
-            c_name, c_btn = st.columns([5, 1], vertical_alignment="center", gap="small")
-            with c_name:
-                _logo_url = f"https://assets.nhle.com/logos/nhl/svg/{_abbr}_light.svg"
-                safe_team_name = escape(str(_name or ""))
-                st.markdown(
-                    f"<div style='display:flex;align-items:center;gap:8px;margin:0;'>"
-                    f"<img src='{_logo_url}' style='width:32px;height:32px;"
-                    f"object-fit:contain;flex-shrink:0;' alt='{safe_team_name} logo'>"
-                    f"<div class='player-name'>{safe_team_name}</div>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-            with c_btn:
-                if st.button("✖", key=f"drop_team_{_abbr}", type="secondary"):
-                    del st.session_state.teams[_abbr]
-                    st.rerun()
+            row = st.empty()
+            with row.container():
+                c_name, c_btn = st.columns([5, 1], vertical_alignment="center", gap="small")
+                with c_name:
+                    _logo_url = f"https://assets.nhle.com/logos/nhl/svg/{_abbr}_light.svg"
+                    safe_team_name = escape(str(_name or ""))
+                    st.markdown(
+                        f"<div style='display:flex;align-items:center;gap:8px;margin:0;'>"
+                        f"<img src='{_logo_url}' style='width:32px;height:32px;"
+                        f"object-fit:contain;flex-shrink:0;' alt='{safe_team_name} logo'>"
+                        f"<div class='player-name'>{safe_team_name}</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                with c_btn:
+                    remove_clicked = st.button("✖", key=f"drop_team_{_abbr}", type="secondary")
+            if remove_clicked:
+                del st.session_state.teams[_abbr]
+                row.empty()
     else:
         st.info("Board is empty")
 

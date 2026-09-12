@@ -200,10 +200,13 @@ else:
 
 # =============================================================================
 # Controls — chart options expander and view toggles.
-# MUST render before render_sidebar() so control widget keys are registered in
-# Streamlit's widget registry before any st.rerun() call from the sidebar can
-# interrupt execution. Without this order, Streamlit orphan-cleans the key=
-# widget entries on player removal and the init block resets them to False.
+# Historically this MUST have rendered before render_sidebar(): the board-removal
+# buttons called st.rerun(), which interrupted the script, and if the control
+# widget keys were not yet registered Streamlit orphan-cleaned them and the init
+# block reset the toggles to False. Both st.rerun() calls are gone (the rows now
+# clear their own st.empty() slot), so the sidebar can no longer interrupt the run
+# and the constraint is no longer load-bearing. The order is kept anyway: nothing
+# is gained by swapping it and the failure it guarded against was silent.
 # The main content split is created before controls so the comparison panel can
 # start higher on desktop while still stacking below the chart on smaller widths.
 # Returns (metric, do_cumul): do_cumul is already resolved (False for rate stats,
@@ -214,23 +217,31 @@ st.markdown("<div id='main-chart-layout'></div>", unsafe_allow_html=True)
 col_chart, col_stats = st.columns([62, 38], gap="medium")
 
 # =============================================================================
-# Slot phase — create empty st.empty() slots BEFORE any pipeline call so the
-# page structure (layout order of chart, controls, detail tabs, predictions) is
-# fixed up front. The slots stay empty until the mount phase (below) fills them
-# with real content once the pipeline resolves. We intentionally do NOT pre-paint
-# skeleton placeholders: on a full rerun (sidebar click, season picker, page
-# refresh) Streamlit streams the skeleton deltas before the real content, so the
-# user saw an ugly skeleton flash on every interaction. An empty slot produces no
-# visible delta until mounted, so there is no flash.
+# Slot phase — reserve the slots BEFORE any pipeline call so the page structure
+# (layout order of chart, controls, detail tabs, predictions) is fixed up front.
+# The mount phase below fills them once the pipeline resolves.
+#
+# These MUST be st.container(), not st.empty(). An Empty delta is not inert: the
+# frontend renders it as a bare <div data-testid="stEmpty">, so re-emitting one
+# each run took the node at that path from Block back to Empty and React tore the
+# subtree down. The chart, tabs and right rail then sat BLANK for the whole
+# pipeline — controls, sidebar (including a live search_player HTTP call), the
+# parquet and baseline loads, process_players — and only popped back at mount.
+# That blanking was the "the page redraws itself on every click" report, and an
+# older comment here wrongly claimed an empty slot produces no visible delta.
+# A Block delta re-sent at the same path reconciles instead: the previous content
+# stays on screen until the new content replaces it, and Streamlit prunes at the
+# end of the run. We still do NOT pre-paint skeleton placeholders — those flashed
+# on every rerun, which is what the empty slots were introduced to fix.
 # =============================================================================
 with col_chart:
-    chart_slot = st.empty()
+    chart_slot = st.container()
     sub_col1, sub_col2 = st.columns([1.96, 2])
-    detail_slot = st.empty()
+    detail_slot = st.container()
 
 with col_stats:
     st.markdown("<div id='comparison-right-rail'></div>", unsafe_allow_html=True)
-    predictions_slot = st.empty()
+    predictions_slot = st.container()
 
 # Must run before pipeline — produces metric and do_cumul.
 with sub_col2:
@@ -366,11 +377,11 @@ with sub_col1:
     render_chart_season_picker(chart_season_options)
 
 # =============================================================================
-# Mount phase — pipeline has resolved, fill the empty slots with real content.
+# Mount phase — pipeline has resolved, fill the reserved slots with real content.
 # Each panel is wrapped in an @st.fragment so post-load widget interactions
 # (toggles, season picker) only rerun that scoped block instead of the whole app.
 # =============================================================================
-with chart_slot.container():
+with chart_slot:
     chart_fragment(
         processed_dfs        = processed_dfs,
         metric               = metric,
@@ -399,7 +410,7 @@ with chart_slot.container():
         suppress_dialogs     = has_pending_matchup_history_dialog_request(),
     )
 
-with detail_slot.container():
+with detail_slot:
     st.markdown("<div id='comparison-detail-layout'></div>", unsafe_allow_html=True)
     detail_tabs_fragment(
         processed_dfs   = processed_dfs,
@@ -414,7 +425,7 @@ with detail_slot.container():
         do_cumul        = do_cumul,
     )
 
-with predictions_slot.container():
+with predictions_slot:
     # matchup_history_bridge_mounted defaults to False, so the panel mounts the bridge
     # itself inside this fragment scope.
     predictions_fragment(share_params=share_params)
@@ -426,7 +437,7 @@ st.markdown("---")
 # Keep this visible version synced with the newest changelog entry
 st.markdown(
     "<p style='text-align:center;color:gray;font-size:14px;'>"
-    "Created by Iksperial. v1.01.5 -- 11,509 lines of Python<br>"
+    "Created by Iksperial. v1.01.6 -- 11,598 lines of Python<br>"
     "<em>Data is the only religion that strictly punishes you for ignoring it.</em>"
     "</p>",
     unsafe_allow_html=True,

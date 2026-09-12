@@ -54,7 +54,7 @@ and stacked matchup cards. The primary trigger is a small JS bridge mounted thro
 - dispatches to `process_players()` or `process_teams()`
 - renders the chart-column `Chart season` picker, the right-rail predictions area, and the comparison panel
 
-`app.py` runs a three-phase render pass: a slot phase that creates empty `st.empty()` slots before any pipeline call (fixing the page layout order without painting any placeholder content), a fetch phase that runs `process_players()` / `process_teams()` synchronously, and a mount phase that renders into the same slot through the `@st.fragment`-wrapped helpers in `nhl/fragments.py`. The slots are left empty until mount because pre-painting shimmer skeletons caused a visible flash on every full rerun (sidebar click, season picker, page refresh) - an empty slot produces no delta until it is filled, so there is no flash. The fragments exist so post-load widget interactions only rerun the chart, detail tabs, or predictions panel they sit in.
+`app.py` runs a three-phase render pass: a slot phase that reserves three `st.container()` slots before any pipeline call (fixing the page layout order without painting any placeholder content), a fetch phase that runs `process_players()` / `process_teams()` synchronously, and a mount phase that renders into the same slot through the `@st.fragment`-wrapped helpers in `nhl/fragments.py`. No shimmer skeletons are pre-painted, because those flashed on every full rerun. The slots MUST stay `st.container()` and must not go back to `st.empty()`: an Empty delta is not inert, the frontend renders it as a bare `<div data-testid="stEmpty">`, so re-emitting one each run took the node at that path from Block back to Empty, React tore the subtree down, and the chart / tabs / right rail sat blank for the whole pipeline before popping back at mount. (An older version of this file claimed an empty slot produces no delta until it is filled. It does, and that blanking was the "the page redraws itself on every click" bug fixed in v1.01.6 - measured at 3 Empty deltas per run before, 0 after.) A Block delta re-sent at the same path reconciles instead, so the previous content stays on screen until the new content replaces it. The fragments exist so post-load widget interactions only rerun the chart, detail tabs, or predictions panel they sit in.
 
 SECTION 2 - FILE STRUCTURE
 --------------------------
@@ -95,7 +95,15 @@ version string in Streamlit's bundle.
 - `data_loaders.py` - app-facing parquet loaders and NHL data wrappers built on the cache/client layer
 - `rarity.py` - historical age-rarity ranking, role splits, and top-season leaderboard payloads
 - `baselines.py` - historical and team baseline builders
-- `knn_engine.py` - KNN projection and fallback logic
+- `knn_engine.py` - KNN projection and fallback logic.  `run_knn_projection()` is memoized on
+  a fingerprint of its inputs (bounded LRU, 256 entries): it runs once per player on every
+  rerun and was the dominant CPU cost of an interaction.  Plain dicts rather than
+  `@st.cache_data`, same reason as `_CAREER_YEARS_MEMO` - this module has no Streamlit
+  dependency, and its DataFrame args are not cheaply hashable by Streamlit's hasher.  The
+  career frame is fingerprinted by hashing its actual CELL VALUES, not a summary: a summary
+  would collide across genuinely different careers and the memo would serve a wrong
+  projection, which is worse than the recompute it saves.  Results are deep-copied on the
+  way out because callers append `proj_rows` into frames and stash `clone_names`.
 - `win_prob.py` - shared pregame feature engineering and runtime scoring math
 - `player_pipeline.py` - full player processing path
 - `team_pipeline.py` - team processing path
@@ -414,6 +422,18 @@ Three rules that are load-bearing here:
    layout footprint at all, and it sanitizes with DOMPurify's html profile - whose allowlist
    contains `style` but not `link`.  Keep these on `st.markdown`.
 
+4. NEGATIVE MARGINS STEAL CLICKS.  The layout pulls sections together with negative margins on
+   zero-height anchor divs (`div.element-container:has(#comparison-detail-layout)` at -3.7rem,
+   `[data-testid="stHorizontalBlock"]:has(#comparison-season-filter)` at -2.4rem, and the
+   `.faq-btn-anchor` rule).  The anchor has no height, so nothing shrinks - the block simply
+   OVERFLOWS out of its container and lands on its neighbour.  Overflowing content still
+   hit-tests, and a later DOM sibling wins, so the covered element goes dead to the mouse while
+   still looking fine.  This shipped: the detail/tabs stack covered the bottom of the Metric
+   Selections popover button and Plotly's positioned `.svg-container` covered the top, leaving
+   only the upper third clickable.  Fix is `position: relative` + `z-index` on the element that
+   must stay clickable - it changes nothing visually.  If you add another negative-margin pull,
+   check what it now overlaps.
+
 Why the page used to flash on every click:
 - streamlit 1.54 marks elements stale and applies
   `STALE_STYLES = {opacity: .33, transition: "opacity 1s ease-in .5s"}`.  `isElementStale()`
@@ -446,9 +466,32 @@ Visual rules:
 - projection = dotted player-colored line with open markers
 - baseline = dashed white semi-transparent line with tiny markers
 
-JS listener rule - the chart div OUTLIVES the script that decorates it:
-- `chart_key` is stable across reruns, so Streamlit keeps the same `.js-plotly-plot` DOM node
-  while the `components.html()` script block re-executes on every iframe (re)load.
+CHART IDENTITY - two different things, do not merge them again:
+- `CHART_WIDGET_KEY` is a CONSTANT passed as `key=` to `st.plotly_chart`. Streamlit hashes the
+  full figure spec into the element id regardless of the key (`plotly_chart.py` passes
+  `key_as_main_identity=False`), and the frontend uses that id as the chart's React key. A
+  constant key therefore means the chart remounts if and only if the figure actually changed.
+- `chart_instance_id` (`_build_chart_instance_id`) identifies the PLOTTED DATA and backs the
+  click-bridge staleness guard in `_parse_chart_click_trigger`, the JS rebind guard, and the
+  toolbar / share-button DOM ids. It folds in board, metric, category, season type, season,
+  x-axis and ALL six view toggles plus `league_filter`.
+- Neither may depend on `sidebar_keys`. It used to: `search_term`, `top_selected`, `team_abbr`
+  and `roster_player` were in the widget key, so typing in the search box or merely browsing
+  another team's roster remounted the chart and reloaded the 22 KB JS iframe while the figure
+  JSON was byte-identical. `render_chart` still accepts `sidebar_keys` for signature stability
+  and deliberately ignores it.
+- The toggles are in `chart_instance_id` for a reason beyond tidiness: the old key omitted
+  `do_era`, `do_cumul`, `do_base`, `do_prime`, `league_filter` and (player mode) `season_type`,
+  so flipping any of them replaced the plot DOM node while the bridge's `data` prop stayed
+  equal - the v2 component's effect never re-ran and the `plotly_click` handler went silently
+  missing. Masked because the native `on_select` path is tried first.
+- Use a stable digest, not `hash()`: Python salts string hashing per process and this value is
+  interpolated into the iframe srcdoc and DOM ids.
+
+JS listener rule - the chart div does NOT always outlive the script that decorates it:
+- The `.js-plotly-plot` node survives a rerun only when the figure is unchanged. Any real data
+  change produces a new element id and a fresh mount, so the `components.html()` script block
+  must handle both cases.
 - Any `plot.on(...)` or `parent.addEventListener(...)` therefore MUST be idempotent, or listeners
   stack one layer per rerun until the chart crawls. This shipped once: an unguarded
   `plotly_relayout` bind made the chart progressively unresponsive after a few dialog cycles.
@@ -657,7 +700,8 @@ Module responsibilities:
 - `data_loaders.py` - local artifact loaders plus app-facing NHL data wrappers; most HTTP should route through `api.py`
 - `rarity.py` - age-rarity ranking payloads, role splits, and top-season leaderboard assembly
 - `baselines.py` - cached historical and team baseline builders
-- `knn_engine.py` - clone matching, hybrid-delta projection, stat caps, fallback projection
+- `knn_engine.py` - clone matching, hybrid-delta projection, stat caps, fallback projection;
+  `run_knn_projection()` memoized on a value-hash fingerprint (see SECTION 2)
 - `win_prob.py` - leak-safe pregame team features, artifact validation, and dot-product scoring
 - `player_pipeline.py` - end-to-end player pipeline and peak metadata
 - `player_pipeline.py` now owns the extra TOI projection gate and the modern-coverage filtering that

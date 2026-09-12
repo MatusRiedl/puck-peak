@@ -4,6 +4,9 @@ Uses L1 distance, the top 10 equal-weight clones, and a fixed 80/20
 clone-prior blend. GP stays out of the KNN path.
 """
 
+import copy
+from collections import OrderedDict
+
 import pandas as pd
 
 from nhl.constants import (
@@ -27,6 +30,13 @@ from nhl.era import apply_era_to_hist
 # @st.cache_data — this module has no Streamlit dependency and keeping it that way
 # is what makes it reusable outside the app.
 _CAREER_YEARS_MEMO: dict[tuple, dict] = {}
+
+# Memo for run_knn_projection(). Bounded LRU, unlike _CAREER_YEARS_MEMO above:
+# the key includes per-player career values, so entries accumulate with every
+# distinct player/metric/toggle combination a session touches. Oldest entries are
+# evicted once the cap is reached.
+_KNN_PROJECTION_MEMO_MAX_ENTRIES = 256
+_KNN_PROJECTION_MEMO: "OrderedDict[tuple, tuple]" = OrderedDict()
 
 
 def _career_years_map(hist_df: pd.DataFrame) -> dict:
@@ -206,7 +216,7 @@ def _stabilize_late_target(
 # Public functions
 # ---------------------------------------------------------------------------
 
-def run_knn_projection(
+def _run_knn_projection_uncached(
     career_df: pd.DataFrame,
     metric: str,
     hist_df: pd.DataFrame,
@@ -218,7 +228,10 @@ def run_knn_projection(
     id_to_name_map: dict,
     clone_details_map: dict,
 ) -> tuple:
-    """Project future ages with KNN clones and return rows plus clone details."""
+    """Project future ages with KNN clones and return rows plus clone details.
+
+    The real work. Call `run_knn_projection` instead — it memoizes this.
+    """
     max_age       = career_df['Age'].max()
     base_name     = career_df['BaseName'].iloc[0] if 'BaseName' in career_df.columns else ''
     # Normalize to float so partial-season pacing can safely scale integer season totals.
@@ -411,6 +424,133 @@ def run_knn_projection(
         last_avg = next_avg
 
     return proj_rows, clone_names
+
+
+def _career_df_fingerprint(career_df: pd.DataFrame) -> tuple:
+    """Return a collision-resistant fingerprint of a player's career frame.
+
+    Hashes the actual cell values rather than a summary. A cheap summary such as
+    (name, row count, metric sum) would collide across genuinely different careers
+    and the memo would then serve a wrong projection — a correctness bug, which is
+    strictly worse than the recompute it saves. Hashing is vectorized and these
+    frames are a couple of dozen rows, so the cost is microseconds.
+
+    Args:
+        career_df: One player's per-season rows, post-pipeline.
+
+    Returns:
+        tuple: Shape, column names, and a value hash.
+    """
+    try:
+        value_hash = int(pd.util.hash_pandas_object(career_df, index=False).sum())
+    except (TypeError, ValueError):
+        # Unhashable cell type: report a unique fingerprint so this call misses the
+        # memo rather than aliasing onto another player's entry.
+        value_hash = None
+    return (career_df.shape, tuple(map(str, career_df.columns)), value_hash)
+
+
+def _hist_df_fingerprint(hist_df: pd.DataFrame) -> tuple:
+    """Return a cheap fingerprint of the KNN reference table.
+
+    Same reasoning as `_career_years_map`: this frame is the immutable
+    parquet-backed career table (optionally filtered to goalies, skaters, or the
+    TOI subset), so length plus its first and last season pin it down. The filter
+    variant is additionally distinguished by `is_goalie` and `metric` in the memo
+    key, and hashing ~8.7k players' worth of rows per call would defeat the memo.
+
+    Args:
+        hist_df: Historical career table used as the clone pool.
+
+    Returns:
+        tuple: Row count and season bounds, or row count alone when unavailable.
+    """
+    if hist_df.empty or 'SeasonYear' not in hist_df.columns:
+        return (len(hist_df),)
+    return (len(hist_df), int(hist_df['SeasonYear'].iat[0]), int(hist_df['SeasonYear'].iat[-1]))
+
+
+def run_knn_projection(
+    career_df: pd.DataFrame,
+    metric: str,
+    hist_df: pd.DataFrame,
+    is_goalie: bool,
+    pos_code: str,
+    do_era: bool,
+    season_type: str,
+    stat_category: str,
+    id_to_name_map: dict,
+    clone_details_map: dict,
+) -> tuple:
+    """Project future ages with KNN clones, memoized on the inputs.
+
+    This runs once per player on every script rerun, and it is the dominant CPU
+    cost of an interaction: flipping a purely cosmetic toggle used to re-derive
+    every projection from scratch. Memoized on a fingerprint of the inputs rather
+    than with `@st.cache_data`, because this module deliberately has no Streamlit
+    dependency (see `_CAREER_YEARS_MEMO`) and the DataFrame arguments are not
+    cheaply hashable by Streamlit's hasher anyway.
+
+    Results are copied on the way out: callers append `proj_rows` into frames and
+    stash `clone_names` in `ml_clones_dict`, so handing back the cached objects
+    would let a caller mutate the cache.
+
+    Args:
+        career_df: One player's per-season rows, post-pipeline.
+        metric: Metric column being projected.
+        hist_df: Historical clone pool, already filtered for this player type.
+        is_goalie: Whether the goalie model applies.
+        pos_code: Position code used for clone matching.
+        do_era: Whether era adjustment was applied upstream.
+        season_type: Active season scope.
+        stat_category: Skater, Goalie, or Team.
+        id_to_name_map: Player id to display name, for clone labels.
+        clone_details_map: Clone metadata, for clone labels.
+
+    Returns:
+        tuple: `(proj_rows, clone_names)`, safe for the caller to mutate.
+    """
+    fingerprint = _career_df_fingerprint(career_df)
+    cache_key = None
+    if fingerprint[-1] is not None:
+        cache_key = (
+            fingerprint,
+            _hist_df_fingerprint(hist_df),
+            str(metric),
+            bool(is_goalie),
+            str(pos_code),
+            bool(do_era),
+            str(season_type),
+            str(stat_category),
+            # These only label clones, and both are cached per category upstream,
+            # so identity plus size is enough to notice a swap.
+            (id(id_to_name_map), len(id_to_name_map)),
+            (id(clone_details_map), len(clone_details_map)),
+        )
+        cached = _KNN_PROJECTION_MEMO.get(cache_key)
+        if cached is not None:
+            _KNN_PROJECTION_MEMO.move_to_end(cache_key)
+            return copy.deepcopy(cached)
+
+    result = _run_knn_projection_uncached(
+        career_df         = career_df,
+        metric            = metric,
+        hist_df           = hist_df,
+        is_goalie         = is_goalie,
+        pos_code          = pos_code,
+        do_era            = do_era,
+        season_type       = season_type,
+        stat_category     = stat_category,
+        id_to_name_map    = id_to_name_map,
+        clone_details_map = clone_details_map,
+    )
+
+    if cache_key is not None:
+        _KNN_PROJECTION_MEMO[cache_key] = copy.deepcopy(result)
+        while len(_KNN_PROJECTION_MEMO) > _KNN_PROJECTION_MEMO_MAX_ENTRIES:
+            _KNN_PROJECTION_MEMO.popitem(last=False)
+
+    return result
 
 
 def run_linear_fallback(
