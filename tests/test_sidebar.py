@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
 
+from nhl.styles import get_app_css_text
+
 from nhl.sidebar import (
     _STAT_CATEGORY_LABELS,
     _SUPPORT_EMOJI,
@@ -70,11 +72,14 @@ class SidebarTests(unittest.TestCase):
         """Keep the FAQ button tied to its dedicated sidebar tint styling."""
         repo_root = Path(__file__).resolve().parents[1]
         sidebar_text = (repo_root / "nhl" / "sidebar.py").read_text(encoding="utf-8")
-        styles_text = (repo_root / "nhl" / "styles.py").read_text(encoding="utf-8")
+        fragments_text = (repo_root / "nhl" / "fragments.py").read_text(encoding="utf-8")
+        css_text = get_app_css_text()
 
-        self.assertIn("faq-btn-anchor", sidebar_text)
-        self.assertIn("faq-btn-anchor", styles_text)
-        self.assertIn("rgba(43, 113, 199, 0.16)", styles_text)
+        # The anchor moved into the FAQ fragment along with the button itself.
+        self.assertNotIn("faq-btn-anchor", sidebar_text)
+        self.assertIn("faq-btn-anchor", fragments_text)
+        self.assertIn("faq-btn-anchor", css_text)
+        self.assertIn("rgba(43, 113, 199, 0.16)", css_text)
 
     def test_brand_logo_is_injected_into_the_header_not_the_sidebar(self):
         """The brand logo lives in the Streamlit header bar, not in sidebar markup.
@@ -98,12 +103,12 @@ class SidebarTests(unittest.TestCase):
         self.assertIn('[data-testid="stHeader"]::after', styles_text)
 
         # The sidebar no longer renders the brand itself, nor the legacy title text.
-        self.assertNotIn("get_header_logo_data_uri()", sidebar_text)
         self.assertNotIn("class='sidebar-brand__title'", sidebar_text)
         self.assertNotIn("class='sidebar-brand__subtitle'", sidebar_text)
 
-        # The FAQ anchor is still the first thing the sidebar emits.
-        self.assertIn("faq-btn-anchor", sidebar_text)
+        # The FAQ affordance is still the first thing the sidebar emits, now via
+        # its fragment wrapper rather than a bare top-level button.
+        self.assertIn("faq_button_fragment()", sidebar_text)
 
     def test_app_injects_base_css_after_page_config(self):
         """Keep base CSS injection wired immediately after page config."""

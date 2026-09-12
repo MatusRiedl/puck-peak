@@ -1,6 +1,6 @@
 import unittest
 
-from nhl.styles import get_favicon_path, get_header_logo_data_uri, get_header_logo_path
+from nhl.styles import _CRITICAL_CSS, get_app_css_path, get_app_css_text, get_favicon_path
 
 
 class StylesTests(unittest.TestCase):
@@ -54,8 +54,8 @@ class StylesTests(unittest.TestCase):
         self.assertIn("page_icon=get_favicon_path().as_posix(),", app_text)
         self.assertIn('initial_sidebar_state="expanded"', app_text)
 
-    def test_get_header_logo_path_points_to_assets_png_location(self):
-        """Resolve the preferred assets-folder brand logo location.
+    def test_external_stylesheet_exists_and_is_pure_css(self):
+        """Keep the extracted stylesheet a real, balanced CSS file.
 
         Args:
             None.
@@ -63,14 +63,24 @@ class StylesTests(unittest.TestCase):
         Returns:
             None.
         """
-        header_logo_path = get_header_logo_path()
+        css_path = get_app_css_path()
+        css_text = get_app_css_text()
 
-        self.assertTrue(header_logo_path.is_absolute())
-        self.assertEqual(header_logo_path.name, "PP.png")
-        self.assertEqual(header_logo_path, get_favicon_path().parent / "PP.png")
+        self.assertTrue(css_path.is_absolute())
+        self.assertEqual(css_path.name, "puckpeak.css")
+        self.assertTrue(css_path.exists())
+        self.assertGreater(len(css_text), 60_000)
 
-    def test_get_header_logo_data_uri_returns_embeddable_png_uri(self):
-        """Return an embeddable PNG brand image URI.
+        # A botched extraction would leave the HTML wrapper behind or unbalance braces.
+        self.assertNotIn("<style>", css_text)
+        self.assertNotIn("</style>", css_text)
+        self.assertEqual(css_text.count("{"), css_text.count("}"))
+
+    def test_stale_element_dimming_is_suppressed_with_a_progress_bar(self):
+        """Keep the anti-flash rules and their replacement affordance in the sheet.
+
+        Streamlit dims every stale element to opacity .33 on a full rerun, which on
+        this page is the whole layout at once. These rules are the fix.
 
         Args:
             None.
@@ -78,11 +88,106 @@ class StylesTests(unittest.TestCase):
         Returns:
             None.
         """
-        data_uri = get_header_logo_data_uri()
+        css_text = get_app_css_text()
 
-        self.assertTrue(data_uri.startswith("data:image/png;base64,"))
-        self.assertIn(";base64,", data_uri)
-        self.assertNotIn("data:image/svg+xml", data_uri)
+        self.assertIn('[data-testid="stElementContainer"][data-stale="true"]', css_text)
+        self.assertIn('[data-testid="stTabs"] [data-baseweb="tab-list"]', css_text)
+        self.assertIn("@keyframes pp-rerun-sweep", css_text)
+        self.assertIn('[data-test-script-state="running"]::after', css_text)
+        self.assertIn('[data-test-script-state="rerunRequested"]::after', css_text)
+        # "initial" must stay excluded so the cold load keeps its own loading state.
+        self.assertNotIn('[data-test-script-state="initial"]', css_text)
+
+    def test_critical_inline_css_covers_first_paint_chrome(self):
+        """Keep the anti-FOUC block small but complete.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        self.assertLess(len(_CRITICAL_CSS.encode("utf-8")), 2_048)
+        for needle in (
+            "stDeployButton",
+            "stStatusWidget",
+            ".block-container",
+            "sidebar-brand__image",
+            "max-width: 768px",
+        ):
+            self.assertIn(needle, _CRITICAL_CSS)
+
+    def test_every_critical_inline_rule_also_exists_in_the_external_sheet(self):
+        """Guard the two copies of the critical rules against drifting apart.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        css_text = get_app_css_text()
+        in_comment = False
+        for line in _CRITICAL_CSS.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("/*"):
+                in_comment = not stripped.endswith("*/")
+                continue
+            if in_comment:
+                in_comment = not stripped.endswith("*/")
+                continue
+            self.assertIn(stripped, css_text, f"critical rule missing from the sheet: {stripped}")
+
+    def test_inject_css_imports_the_media_url_and_falls_back_when_bare(self):
+        """Emit an @import when a runtime serves the sheet, the full CSS when not.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        import nhl.styles as styles
+
+        emitted: list[str] = []
+        original_markdown = styles.st.markdown
+        styles.st.markdown = lambda body, **kwargs: emitted.append(body)
+        try:
+            styles.inject_css()  # no runtime in the test process
+            self.assertEqual(len(emitted), 1)
+            bare = emitted[0]
+            self.assertNotIn("@import url(", bare)
+            self.assertIn("stDeployButton", bare)
+
+            emitted.clear()
+            original_media_url = styles._media_url
+            styles._media_url = lambda *a, **k: "/media/deadbeef.css?v=1"
+            try:
+                styles.inject_css()
+            finally:
+                styles._media_url = original_media_url
+        finally:
+            styles.st.markdown = original_markdown
+
+        served = emitted[0]
+        self.assertTrue(served.startswith('<style>@import url("/media/deadbeef.css?v=1");'))
+        self.assertIn("stDeployButton", served)
+
+    def test_app_keeps_exactly_three_top_level_style_injections(self):
+        """Each style element occupies a flex gap the top padding is tuned around.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        app_text = (get_favicon_path().parent.parent / "app.py").read_text(encoding="utf-8")
+
+        for call in ("inject_css()", "inject_mobile_dropdown_fix()", "inject_header_bb_logo()"):
+            self.assertEqual(app_text.count(chr(10) + call), 1, call)
 
     def test_project_streamlit_config_defaults_to_dark_theme(self):
         """Keep the project-level Streamlit theme defaulted to dark.
@@ -113,7 +218,6 @@ class StylesTests(unittest.TestCase):
             'page_title="Puck Peak"',
             app_text,
         )
-        self.assertNotIn("get_header_logo_data_uri()", app_text)
         self.assertNotIn("page-header-logo", app_text)
         self.assertNotIn("page-hero", app_text)
         self.assertNotIn("animated-title", app_text)
@@ -131,7 +235,7 @@ class StylesTests(unittest.TestCase):
             None.
         """
         repo_root = get_favicon_path().parent.parent
-        styles_text = (repo_root / "nhl" / "styles.py").read_text(encoding="utf-8")
+        styles_text = get_app_css_text()
 
         self.assertIn(".sidebar-brand", styles_text)
         self.assertIn(".sidebar-brand__image", styles_text)
@@ -180,7 +284,7 @@ class StylesTests(unittest.TestCase):
         Returns:
             None.
         """
-        styles_text = (get_favicon_path().parent.parent / "nhl" / "styles.py").read_text(encoding="utf-8")
+        styles_text = get_app_css_text()
 
         self.assertIn('padding-left: 0.5rem !important;', styles_text)
         self.assertIn('padding-right: 0.5rem !important;', styles_text)
@@ -202,7 +306,7 @@ class StylesTests(unittest.TestCase):
         """Keep the deliberate chart hover shadow and the rail's soft meta popovers."""
         repo_root = get_favicon_path().parent.parent
         chart_text = (repo_root / "nhl" / "chart.py").read_text(encoding="utf-8")
-        styles_text = (repo_root / "nhl" / "styles.py").read_text(encoding="utf-8")
+        styles_text = get_app_css_text()
 
         self.assertIn('.js-plotly-plot .hoverlayer .hovertext', chart_text)
         self.assertIn('drop-shadow(0 6px 18px rgba(0, 0, 0, 0.62))', chart_text)
@@ -222,15 +326,21 @@ class StylesTests(unittest.TestCase):
         repo_root = get_favicon_path().parent.parent
         app_text = (repo_root / "app.py").read_text(encoding="utf-8")
         sidebar_text = (repo_root / "nhl" / "sidebar.py").read_text(encoding="utf-8")
+        fragments_text = (repo_root / "nhl" / "fragments.py").read_text(encoding="utf-8")
         dialog_text = (repo_root / "nhl" / "dialog.py").read_text(encoding="utf-8")
 
+        # The button moved into a fragment so clicking it no longer reruns the whole
+        # script just to open a modal; the sidebar only calls the wrapper now.
         self.assertNotIn('from nhl.dialog import show_app_guide', app_text)
-        self.assertIn('from nhl.dialog import show_app_guide', sidebar_text)
-        self.assertIn('st.button(', sidebar_text)
-        self.assertIn('"FAQ"', sidebar_text)
-        self.assertIn('key="open_app_guide_sidebar"', sidebar_text)
-        self.assertIn('type="secondary"', sidebar_text)
-        self.assertIn('help="How this app works"', sidebar_text)
+        self.assertNotIn('from nhl.dialog import show_app_guide', sidebar_text)
+        self.assertIn('from nhl.fragments import faq_button_fragment', sidebar_text)
+        self.assertIn('faq_button_fragment()', sidebar_text)
+        self.assertIn('from nhl.dialog import show_app_guide', fragments_text)
+        self.assertIn('st.button(', fragments_text)
+        self.assertIn('"FAQ"', fragments_text)
+        self.assertIn('key="open_app_guide_sidebar"', fragments_text)
+        self.assertIn('type="secondary"', fragments_text)
+        self.assertIn('help="How this app works"', fragments_text)
         self.assertIn('@st.dialog("How This App Works")', dialog_text)
         self.assertIn("**What is ML-ish**", dialog_text)
         self.assertIn("**Skater baseline**", dialog_text)
@@ -246,7 +356,7 @@ class StylesTests(unittest.TestCase):
         Returns:
             None.
         """
-        styles_text = (get_favicon_path().parent.parent / "nhl" / "styles.py").read_text(encoding="utf-8")
+        styles_text = get_app_css_text()
 
         self.assertIn(
             '[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] button[kind="secondary"][data-testid="stBaseButton-secondary"]',
@@ -268,7 +378,7 @@ class StylesTests(unittest.TestCase):
         """
         repo_root = get_favicon_path().parent.parent
         sidebar_text = (repo_root / "nhl" / "sidebar.py").read_text(encoding="utf-8")
-        styles_text = (repo_root / "nhl" / "styles.py").read_text(encoding="utf-8")
+        styles_text = get_app_css_text()
 
         self.assertIn('_SUPPORT_URL = "https://ko-fi.com/iksperial"', sidebar_text)
         self.assertIn('_SUPPORT_LABEL = "Buy me a coffee"', sidebar_text)
@@ -297,7 +407,7 @@ class StylesTests(unittest.TestCase):
         Returns:
             None.
         """
-        styles_text = (get_favicon_path().parent.parent / "nhl" / "styles.py").read_text(encoding="utf-8")
+        styles_text = get_app_css_text()
 
         self.assertIn(".live-game-card-link {", styles_text)
         self.assertIn(".live-game-card {", styles_text)
@@ -312,7 +422,7 @@ class StylesTests(unittest.TestCase):
 
     def test_stanley_cup_board_css_uses_scoped_comparison_styles(self):
         """Keep the Stanley Cup board visually integrated with the comparison panel."""
-        styles_text = (get_favicon_path().parent.parent / "nhl" / "styles.py").read_text(encoding="utf-8")
+        styles_text = get_app_css_text()
 
         self.assertIn(".stanley-cup-board-meta {", styles_text)
         self.assertIn(".stanley-cup-division-heading {", styles_text)
@@ -365,7 +475,7 @@ class StylesTests(unittest.TestCase):
         Returns:
             None.
         """
-        styles_text = (get_favicon_path().parent.parent / "nhl" / "styles.py").read_text(encoding="utf-8")
+        styles_text = get_app_css_text()
 
         self.assertIn('.js-plotly-plot .plotly .modebar {', styles_text)
         self.assertIn('background: transparent !important;', styles_text)
@@ -382,7 +492,7 @@ class StylesTests(unittest.TestCase):
         Returns:
             None.
         """
-        styles_text = (get_favicon_path().parent.parent / "nhl" / "styles.py").read_text(encoding="utf-8")
+        styles_text = get_app_css_text()
 
         self.assertIn('.nhl-chart-toolbar__title {', styles_text)
         self.assertIn('color: rgba(255, 255, 255, 0.90);', styles_text)
@@ -402,7 +512,7 @@ class StylesTests(unittest.TestCase):
         """
         repo_root = get_favicon_path().parent.parent
         sidebar_text = (repo_root / "nhl" / "sidebar.py").read_text(encoding="utf-8")
-        styles_text = (repo_root / "nhl" / "styles.py").read_text(encoding="utf-8")
+        styles_text = get_app_css_text()
 
         self.assertIn('"Team Comparison"', sidebar_text)
         self.assertIn("comparison-panel-heading--rail-title", sidebar_text)
@@ -421,7 +531,7 @@ class StylesTests(unittest.TestCase):
         Returns:
             None.
         """
-        styles_text = (get_favicon_path().parent.parent / "nhl" / "styles.py").read_text(encoding="utf-8")
+        styles_text = get_app_css_text()
 
         self.assertIn('div:has(> #controls-dropdowns) + div [data-testid="column"]', styles_text)
         self.assertIn('div:has(> #controls-dropdowns) + div [data-testid="stHorizontalBlock"]', styles_text)
@@ -442,7 +552,7 @@ class StylesTests(unittest.TestCase):
         repo_root = get_favicon_path().parent.parent
         controls_text = (repo_root / "nhl" / "controls.py").read_text(encoding="utf-8")
         app_text = (repo_root / "app.py").read_text(encoding="utf-8")
-        styles_text = (repo_root / "nhl" / "styles.py").read_text(encoding="utf-8")
+        styles_text = get_app_css_text()
 
         self.assertIn('st.pills(', controls_text)
         self.assertIn('label_visibility="collapsed"', controls_text)

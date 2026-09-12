@@ -77,12 +77,14 @@ session-state orchestrator and render pass; most logic lives in the package modu
 
 ```
 app.py                   entry point and session-state orchestrator
+assets/
+    puckpeak.css         the application stylesheet, served from /media/<hash>.css
 nhl/
     api.py               central NHLClient with retry, dedup, and rate limiting
     cache.py             shared cache wrapper backed by diskcache or an in-process fallback
     cache_warmer.py      optional background cache warmer for live, seasonal, and historical paths
     constants.py         URLs, team list, stat caps, NHLe multipliers
-    styles.py            CSS injection
+    styles.py            stylesheet delivery (media endpoint) and asset helpers
     era.py               era-adjustment math (no Streamlit dependency)
     data_loaders.py      cached API fetch, season discovery, game-log, and parquet loaders
     rarity.py            age-rarity percentile/rank engine plus top-season leaderboard payloads
@@ -96,7 +98,7 @@ nhl/
     dialog.py            season-detail and matchup-history dialogs
     chart.py             Plotly chart rendering, share link, JS pan-clamp, and chart click bridge
     comparison.py        Overview/Current Standings detail tabs, chart-season picker helper, clickable predictions panel, and live standings wrapper
-    fragments.py         @st.fragment wrappers around the chart, detail tabs, and predictions panel so post-load widget reruns stay scoped
+    fragments.py         @st.fragment wrappers around the chart, detail tabs, predictions panel, and FAQ button so widget reruns stay scoped
     ui_state.py          session-state helpers plus the one-slot dialog mutex (begin_script_run / begin_dialog_run)
     stanley_cup.py       standings-board and Cup-pick builder
     url_params.py        URL query param encode/decode for shareable links and chart season state

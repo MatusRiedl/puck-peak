@@ -94,6 +94,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+# Exactly three top-level style injections, and it must stay three: each one occupies
+# a flex gap in the main block container, and `.block-container { padding-top }` is
+# tuned around that count.
 inject_css()
 inject_mobile_dropdown_fix()
 inject_header_bb_logo()
@@ -423,7 +426,7 @@ st.markdown("---")
 # Keep this visible version synced with the newest changelog entry
 st.markdown(
     "<p style='text-align:center;color:gray;font-size:14px;'>"
-    "Created by Iksperial. v1.01.4 -- 11,483 lines of Python<br>"
+    "Created by Iksperial. v1.01.5 -- 11,509 lines of Python<br>"
     "<em>Data is the only religion that strictly punishes you for ignoring it.</em>"
     "</p>",
     unsafe_allow_html=True,

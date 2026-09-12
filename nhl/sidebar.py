@@ -29,8 +29,7 @@ from nhl.data_loaders import (
     search_local_players,
     search_player,
 )
-from nhl.dialog import show_app_guide
-
+from nhl.fragments import faq_button_fragment
 
 
 _VALID_STAT_CATEGORIES = ("Skater", "Goalie", "Team")
@@ -384,15 +383,9 @@ def render_sidebar() -> dict:
             st.session_state._stat_category_picker = current_category
 
 
-        st.markdown("<div class='faq-btn-anchor'></div>", unsafe_allow_html=True)
-        if st.button(
-            "FAQ",
-            key="open_app_guide_sidebar",
-            type="secondary",
-            use_container_width=True,
-            help="How this app works",
-        ):
-            show_app_guide()
+        # Fragment-scoped on purpose: as a top-level widget this button reran the
+        # entire script just to open a modal that reads no pipeline data.
+        faq_button_fragment()
 
         st.markdown(
             "<div class='comparison-panel-heading comparison-panel-heading--rail-title'"

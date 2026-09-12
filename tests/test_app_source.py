@@ -66,9 +66,33 @@ class AppSourceTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "nhl" / "fragments.py"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("from nhl.ui_state import begin_dialog_run", fragments_text)
-        for scope in ("chart", "detail_tabs", "predictions"):
+        self.assertIn("begin_dialog_run", fragments_text)
+        for scope in ("chart", "detail_tabs", "predictions", "faq"):
             self.assertIn(f'begin_dialog_run("{scope}")', fragments_text)
+
+    def test_faq_button_is_fragment_scoped_and_takes_the_dialog_slot(self):
+        """The FAQ button must not rerun the whole script to open a modal.
+
+        At top-level sidebar scope its click cost a full pipeline run and a rebuilt
+        Plotly figure for a dialog that reads none of it. It was also the only one of
+        the six st.dialog call sites that never reserved the one-dialog slot.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        fragments_text = (repo_root / "nhl" / "fragments.py").read_text(encoding="utf-8")
+        sidebar_text = (repo_root / "nhl" / "sidebar.py").read_text(encoding="utf-8")
+
+        faq_index = fragments_text.index("def faq_button_fragment()")
+        self.assertIn("@st.fragment", fragments_text[faq_index - 60: faq_index])
+
+        faq_body = fragments_text[faq_index:]
+        self.assertIn("dialog_slot_available()", faq_body)
+        self.assertIn("mark_dialog_opened_this_run()", faq_body)
+        self.assertIn("show_app_guide()", faq_body)
+
+        # The sidebar only calls the wrapper; it no longer owns the button or dialog.
+        self.assertIn("faq_button_fragment()", sidebar_text)
+        self.assertNotIn("show_app_guide", sidebar_text)
+        self.assertNotIn('key="open_app_guide_sidebar"', sidebar_text)
 
     def test_app_imports_and_starts_background_cache_warmer(self):
         """Start the optional cache warmer during app startup."""

@@ -86,7 +86,9 @@ version string in Streamlit's bundle.
 `nhl/` modules:
 - `__init__.py` - package index docstring
 - `constants.py` - shared constants and metric sets
-- `styles.py` - CSS injection helpers
+- `styles.py` - stylesheet delivery and UI asset helpers.  The sheet itself is
+  `assets/puckpeak.css`, handed to streamlit's media file manager and pulled into the page
+  with a one-line `@import`; only a ~1.4 KB critical block is inlined per run
 - `era.py` - era multipliers and historical adjustment helpers
 - `cache.py` - shared cache backend, TTL tiers, and `effective_ttl()` helpers
 - `api.py` - central `NHLClient` with rate limiting, retry, deduplication, and cache-aware HTTP
@@ -102,7 +104,7 @@ version string in Streamlit's bundle.
 - `dialog.py` - chart click dialogs and matchup-history modal
 - `chart.py` - Plotly render, baseline overlay, share link, native point-click dispatch, and dialog routing
 - `comparison.py` - Overview / Current Standings tabs, the chart-season picker renderer, clickable predictions panel, and live standings board markup
-- `fragments.py` - `@st.fragment` wrappers around `render_chart`, `render_detail_tabs`, and `render_predictions_panel` so post-load widget interactions stay scoped to one panel
+- `fragments.py` - `@st.fragment` wrappers around `render_chart`, `render_detail_tabs`, `render_predictions_panel`, and the sidebar FAQ button so widget interactions stay scoped
 - `ui_state.py` - session-state helpers plus the one-slot dialog mutex (`begin_script_run()`,
   `begin_dialog_run(scope)`); see the DIALOG SLOT rules in SECTION 4
 - `stanley_cup.py` - current-standings / Cup-pick board builder
@@ -211,8 +213,10 @@ One-shot guards:
 DIALOG SLOT - read this before changing anything that opens a dialog
 --------------------------------------------------------------------
 Only one `st.dialog` may open per rerun, so `nhl/ui_state.py` keeps a one-slot mutex in
-`_dialog_opened_this_run`. Six call sites take the slot with `mark_dialog_opened_this_run()`.
-Releasing it is the part that is easy to get wrong.
+`_dialog_opened_this_run`. Six call sites take the slot with `mark_dialog_opened_this_run()`,
+and as of v1.01.5 that is genuinely all six - the sidebar FAQ button used to open
+`show_app_guide()` with no gate at all, which happened to be safe only because it always fired
+on a fresh full run. Releasing the slot is the part that is easy to get wrong.
 
 Rules:
 - `app.py` calls `begin_script_run()` once per full script run. That clears the slot and bumps
@@ -227,7 +231,7 @@ Why it is shaped that way (both failure modes are real, one shipped):
   top-level `app.py`, and the Player Details / Team Details / Matchup History dialogs use the
   default `on_dismiss="ignore"` so closing them reruns nothing either. The flag latched True and
   every later dialog was silently swallowed - chart clicks and player cards alike.
-- Resetting unconditionally in every fragment is wrong the other way: on a full run all three
+- Resetting unconditionally in every fragment is wrong the other way: on a full run the
   fragments execute in sequence, so a later one would clear a reservation an earlier one had
   already taken and two dialogs would try to open in one run.
 The run-token check is what satisfies both. `tests/test_dialog_run_scope.py` pins the behaviour.
@@ -374,6 +378,66 @@ Rendering rules:
 - player mode uses historical skater or goalie baselines
 - team mode uses team baselines
 - Games Played mode disables baselines because the stored baseline index is age-based
+
+SECTION 8B - STYLESHEET DELIVERY AND RERUN FEEDBACK
+---------------------------------------------------
+Where the CSS lives:
+- `assets/puckpeak.css` is the whole stylesheet and the thing you edit.  It used to be a 77 KB
+  `_CSS` string inside `nhl/styles.py`.
+- `inject_css()` hands the bytes to streamlit's media file manager and emits
+  `<style>@import url("/media/<sha224>.css?v=1");</style>` followed by a ~1.4 KB critical block.
+  Measured through the real MediaFileHandler: `Content-Type: text/css`,
+  `Cache-Control: max-age=315360000` (the `?v=1` is what flips tornado into that mode; safe
+  because the path is a content hash), gzipped to 13.7 KB on the wire.
+- `inject_header_bb_logo()` does the same for `assets/BB.png`, replacing a 101 KB base64 data URI.
+
+Three rules that are load-bearing here:
+
+1. DO NOT move this to streamlit's static file endpoint.  `AppStaticFileHandler.set_extra_headers`
+   forces `Content-Type: text/plain` plus `X-Content-Type-Options: nosniff` for every extension
+   outside `SAFE_APP_STATIC_FILE_EXTENSIONS`, and `.css` is not on that list.  Browsers refuse a
+   `text/plain` stylesheet in standards mode, for `@import` and `<link>` alike, and no rename
+   fixes it.  `MediaFileHandler` has no such override.  `server.enableStaticServing` stays off.
+
+2. DO NOT memoize the media URL.  `script_runner.py` calls `media_file_mgr.clear_session_refs()`
+   at the start of every FULL run and `remove_orphaned_files()` at the end, so a file nobody
+   re-registered that run is collected.  Fragment reruns deliberately skip the clear, so they do
+   not need to re-register.  `_media_url()` is idempotent and content-addressed, so calling it on
+   every run is free and always yields the same URL.
+
+3. `app.py` must keep EXACTLY THREE top-level style injections (`inject_css`,
+   `inject_mobile_dropdown_fix`, `inject_header_bb_logo`).  `markdown` is not in the frontend's
+   `GLOBAL_ELEMENTS` list, so each `<style>` element container occupies a flex gap in the main
+   block container, and `.block-container { padding-top: 3.85rem }` is tuned around that count.
+   Collapsing them into one call shifts the whole page up.  A test pins the count.
+   Related trap: `st.html()` with style-only content routes to the event container, which has NO
+   layout footprint at all, and it sanitizes with DOMPurify's html profile - whose allowlist
+   contains `style` but not `link`.  Keep these on `st.markdown`.
+
+Why the page used to flash on every click:
+- streamlit 1.54 marks elements stale and applies
+  `STALE_STYLES = {opacity: .33, transition: "opacity 1s ease-in .5s"}`.  `isElementStale()`
+  returns true for EVERY element when the state is `RERUN_REQUESTED`, and on a `RUNNING` full run
+  for every element whose `scriptRunId` is older than the current one.  On a fragment rerun it
+  only matches elements carrying that fragment's id.
+- That is the whole explanation for "card clicks are silent but the category switch flashes": the
+  click bridges are fragment-scoped, the sidebar widgets are not.
+- The declaration is removed wholesale when the new delta lands - transition included - so the
+  page fades out over a second and then snaps back instantly.  That asymmetry is what reads as a
+  redraw rather than a load.
+- `assets/puckpeak.css` pins `[data-testid="stElementContainer"][data-stale="true"]` back to
+  opacity 1.  The baseweb tab list and tab buttons need their own rule: they get `STALE_STYLES`
+  inline from component overrides, not through the `data-stale` attribute.
+- Replacing it: a 2px bar on `[data-testid="stApp"][data-test-script-state="running"]::after` and
+  the same for `"rerunRequested"`.  That attribute is streamlit's own run-state readout, so it
+  costs one attribute match instead of a `:has()` scan and it covers fragment reruns too.
+  `"initial"` is excluded on purpose - a cold load already has the skeleton and the branded
+  `stSpinner` bar.  A 220ms `animation-delay` keeps fast reruns completely silent.
+- Worth knowing before optimizing payload again: streamlit's ForwardMsg cache already
+  deduplicates any cacheable `new_element` delta at or above `global.minCachedMessageSize`
+  (10 KB) from the SECOND rerun of a connection onward - the browser sends
+  `cachedMessageHashes` with every rerun request and the server swaps in a ~60-byte reference.
+  So big inline blobs are not a per-click cost; they are a cold-load and reconnect cost.
 
 SECTION 9 - PLOTLY RENDERING GUARDRAILS
 ---------------------------------------
@@ -605,7 +669,7 @@ Module responsibilities:
 - `dialog.py` now inserts the rarity callout directly under `Career Subtotals` in player age snapshots
 - `chart.py` - figure assembly, baseline overlay, share-link button, Plotly click bridge, and player/team click dispatch
 - `comparison.py` - season-aware Overview / Current Standings tabs, the chart-season picker renderer, JS click bridges (prediction-card and identity-card), clickable predictions panel, and live standings board wrapper
-- `fragments.py` - `@st.fragment`-decorated wrappers around `render_chart`, `render_detail_tabs`, and `render_predictions_panel`; called during the mount phase so post-load widget interactions only rerun the affected panel
+- `fragments.py` - `@st.fragment`-decorated wrappers around `render_chart`, `render_detail_tabs`, `render_predictions_panel`, and the sidebar FAQ button; called during the mount phase (the FAQ one from `render_sidebar`) so widget interactions only rerun the affected panel
 - `stanley_cup.py` - standings-board assembly and Cup-pick summarization
 - `url_params.py` - compact share-link encoder/decoder with legacy-link sanitization and canonicalization
 - `schedule.py` - live/recent matchup detection, upcoming games, featured players, matchup history, and runtime pregame win-prob inference
@@ -660,7 +724,13 @@ Repo artifacts (committed):
 - `docker-compose.yml` - single service `puck-peak`, joins external network `web`, no host
   port publish, named volume `nhl_cache` mounted at `/app/.cache/nhl_api`
 - `.dockerignore` - excludes `.git`, `.cache`, `tests`, `debug`, `docs`, scraper/trainer
-  scripts, and project markdown metadata so those stay out of the image
+  scripts, and project markdown metadata so those stay out of the image. `assets/` must keep
+  shipping: it holds `puckpeak.css` and `BB.png`, which are read at import and served from
+  `/media/`. Only `assets/PP.psd` is excluded.
+- No Caddy change is needed for the stylesheet. `/media/*` is a core streamlit endpoint on the
+  same origin and port as `/_stcore/stream`, so any Caddyfile that reverse-proxies the site at
+  all passes it through. The only thing that could break it is a `Content-Security-Policy` whose
+  `style-src` omits `'self'`, which would block the `@import`.
 
 Server-side layout:
 - `/opt/puck-peak/` - this repo, cloned from GitHub

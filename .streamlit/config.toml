@@ -11,8 +11,8 @@ fileWatcherType = "none"
 # NOTE: enableWebsocketCompression was set here and removed again. It was never tested
 # through the Caddy reverse proxy, where permessage-deflate negotiated with context
 # takeover on both sides. Do not re-enable it without verifying a long session through
-# the real proxy first — the ~75 KB of CSS per rerun is better solved by not re-sending
-# the stylesheet than by compressing the stream.
+# the real proxy first. The ~75 KB of CSS that prompted it is now served from /media/
+# instead of being pasted into the page, so there is much less left to compress.
 
 [theme]
 base                     = "dark"
