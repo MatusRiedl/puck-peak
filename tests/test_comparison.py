@@ -52,8 +52,12 @@ class ComparisonTests(unittest.TestCase):
                 "pregame_win_prob": {
                     "away_pct": 34,
                     "home_pct": 66,
-                    "model_label": "Base model: TOR edge from season points %.",
-                    "goalie_label": "Goalie proxy: TOR +2.0 pts from save% edge.",
+                    "fair_odds_away": 2.94,
+                    "fair_odds_home": 1.52,
+                    "model_label": "Model: TOR edge from team rating.",
+                    "away_back_to_back": True,
+                    "home_back_to_back": False,
+                    "early_season": True,
                 },
             }
         )
@@ -69,6 +73,41 @@ class ComparisonTests(unittest.TestCase):
         self.assertIn("66%", html)
         self.assertIn("live-game-card--home-lead", html)
         self.assertIn("live-games-probability__divider", html)
+        self.assertIn("Fair odds: Red Wings 2.94 · Maple Leafs 1.52", html)
+        self.assertIn("Back-to-back: Red Wings", html)
+        self.assertIn("Early season: ratings still lean on last season.", html)
+        self.assertNotIn("Goalie proxy", html)
+        self.assertNotIn("60-minute result", html)
+
+    def test_live_game_card_html_shows_sixty_minute_and_puck_line_markets(self):
+        """Markets render away/draw/home with probabilities and fair odds; the favourite takes -1.5."""
+        html = _build_live_game_card_html(
+            {
+                "away_abbr": "DET",
+                "away_name": "Detroit Red Wings",
+                "home_abbr": "TOR",
+                "home_name": "Toronto Maple Leafs",
+                "start_label_cest": "Tue 10 Mar, 01:00 CET",
+                "venue": "",
+                "game_type": 2,
+                "pregame_win_prob": {
+                    "away_pct": 38,
+                    "home_pct": 62,
+                    "model_label": "Model: TOR edge from team rating.",
+                    "markets": {
+                        "regulation": {"away": 0.29, "draw": 0.22, "home": 0.49},
+                        "puck_line": {"home_minus_1_5": 0.25, "away_minus_1_5": 0.12},
+                    },
+                },
+            }
+        )
+
+        self.assertIn("60-minute result", html)
+        self.assertIn("<span class='lgc-market__label'>Red Wings</span><span class='lgc-market__pct'>29%</span><span class='lgc-market__odds'>3.45</span>", html)
+        self.assertIn("<span class='lgc-market__label'>Draw</span><span class='lgc-market__pct'>22%</span><span class='lgc-market__odds'>4.55</span>", html)
+        self.assertIn("<span class='lgc-market__label'>Maple Leafs −1.5</span><span class='lgc-market__pct'>25%</span><span class='lgc-market__odds'>4.00</span>", html)
+        self.assertIn("<span class='lgc-market__label'>Red Wings +1.5</span><span class='lgc-market__pct'>75%</span><span class='lgc-market__odds'>1.33</span>", html)
+        self.assertNotIn("Over", html)
 
     def test_live_game_card_html_falls_back_to_muted_copy_without_probability(self):
         """Show a muted placeholder when pregame odds are unavailable."""
@@ -80,12 +119,64 @@ class ComparisonTests(unittest.TestCase):
                 "home_name": "Montreal Canadiens",
                 "start_label_cest": "Time TBD",
                 "venue": "",
+                "game_type": 2,
                 "pregame_win_prob": None,
             }
         )
 
-        self.assertIn("Estimate available once both teams have played a few games.", html)
+        self.assertIn("Estimate unavailable right now.", html)
         self.assertIn("live-game-card--no-prob", html)
+
+    def test_live_game_card_html_marks_preseason_games_as_exhibitions(self):
+        """Preseason games are listed but never predicted."""
+        html = _build_live_game_card_html(
+            {
+                "away_abbr": "BOS",
+                "away_name": "Boston Bruins",
+                "home_abbr": "PHI",
+                "home_name": "Philadelphia Flyers",
+                "start_label_cest": "Fri 25 Sep, 01:00 CEST",
+                "venue": "",
+                "game_type": 1,
+                "pregame_win_prob": None,
+            }
+        )
+
+        self.assertIn("Exhibition — no prediction.", html)
+        self.assertIn("Preseason", html)
+
+    def test_track_record_shows_live_market_and_backtest_lines_once_enough_games_are_graded(self):
+        """With enough graded games the live record, the market comparison and the backtest all show."""
+        markup = comparison_module._build_track_record_markup(
+            {
+                "season_year": 2026,
+                "min_games": 20,
+                "live": {
+                    "logged": 140, "games": 128, "accuracy": 0.584, "log_loss": 0.6712, "coin_flip_log_loss": 0.6931,
+                    "market_games": 120, "market_log_loss": 0.6655, "model_log_loss_on_market_games": 0.6701,
+                },
+                "backtest": {"first_season": 2021, "last_season": 2025, "games": 6560, "accuracy": 0.599, "log_loss": 0.6614},
+            }
+        )
+
+        self.assertIn("<strong>2026-27 live:</strong> 128 games · 58% winners picked · log loss 0.671 (coin flip 0.693)", markup)
+        self.assertIn("Betting market, same 120 games: log loss 0.665 vs model 0.670", markup)
+        self.assertIn("Backtest 2021-22 to 2025-26: 6,560 games · 60% winners · log loss 0.661", markup)
+        self.assertNotIn("FanDuel", markup)
+
+    def test_track_record_waits_for_enough_graded_games(self):
+        """A few results say nothing about accuracy, so only progress is shown."""
+        markup = comparison_module._build_track_record_markup(
+            {"season_year": 2026, "min_games": 20, "live": {"logged": 3, "games": 1, "accuracy": 1.0, "log_loss": 0.2}, "backtest": None}
+        )
+        empty_season = comparison_module._build_track_record_markup(
+            {"season_year": 2026, "min_games": 20, "live": {"logged": 0, "games": 0}, "backtest": None}
+        )
+
+        self.assertIn("3 predictions logged, 1 graded; results appear after 20 graded games.", markup)
+        self.assertNotIn("winners picked", markup)
+        self.assertIn("starts with the first regular-season games", empty_season)
+        self.assertEqual(comparison_module._build_track_record_markup(None), "")
 
     def test_live_game_card_link_html_is_a_non_navigating_overlay(self):
         """The card overlay must carry no href, only bridge hooks.
@@ -470,8 +561,15 @@ class ComparisonTests(unittest.TestCase):
     def test_current_standings_tab_renders_board_meta_and_favorite_text(self):
         """Render the Current Standings board using the shared comparison-area styles."""
         board = {
+            "mode": "odds",
             "generated_at_label": "Current as of Mar 12, 2026 20:28 UTC",
-            "favorite_team": {"team_name": "Colorado Avalanche"},
+            "season_label": "2025-26",
+            "favorite_team": {"team_name": "Colorado Avalanche", "cup_pct": 0.214},
+            "summary_text": "Colorado Avalanche: 21.4% to win the 2025-26 Stanley Cup.",
+            "contenders": [
+                {"team_abbr": "COL", "team_name": "Colorado Avalanche", "team_common_name": "Avalanche", "cup_pct": 0.214},
+                {"team_abbr": "DAL", "team_name": "Dallas Stars", "team_common_name": "Stars", "cup_pct": 0.004},
+            ],
             "divisions": [
                 {
                     "division_name": "Central",
@@ -487,6 +585,8 @@ class ComparisonTests(unittest.TestCase):
                             "losses": 11,
                             "ot_losses": 9,
                             "points": 95,
+                            "playoff_pct": 0.97,
+                            "cup_pct": 0.214,
                             "is_favorite": True,
                         },
                         {
@@ -499,6 +599,8 @@ class ComparisonTests(unittest.TestCase):
                             "losses": 14,
                             "ot_losses": 10,
                             "points": 90,
+                            "playoff_pct": 0.0,
+                            "cup_pct": 0.004,
                             "is_favorite": False,
                         },
                     ],
@@ -517,11 +619,70 @@ class ComparisonTests(unittest.TestCase):
             comparison_module._render_current_standings_shared()
 
         markup = _joined_markdown_output(mock_markdown)
-        self.assertIn("Cup pick: <strong>Colorado Avalanche</strong>", markup)
+        self.assertIn("<strong>Colorado Avalanche</strong> · 21% to win the Cup", markup)
+        self.assertIn("title='Cup favorite'", markup)
         self.assertIn("Current as of Mar 12, 2026 20:28 UTC", markup)
         self.assertIn("Central Division", markup)
         self.assertIn("Western Conference", markup)
         self.assertIn("COL_light.svg", markup)
+        self.assertIn("stanley-cup-division-window--odds", markup)
+        self.assertIn(">Playoffs</div>", markup)
+        self.assertIn("stanley-cup-row-value--cup'>21%</div>", markup)
+        self.assertIn("stanley-cup-row-value--cup'>0.4%</div>", markup)
+        self.assertIn("stanley-cup-row-value--odds'>—</div>", markup)
+        self.assertIn("Most likely champions:", markup)
+
+    def test_preseason_board_shows_projected_points_instead_of_last_seasons_record(self):
+        """Before opening night the table shows projections, not a stale record."""
+        board = {
+            "mode": "preseason",
+            "generated_at_label": "2026-27 preseason projection",
+            "favorite_team": {"team_name": "Carolina Hurricanes", "cup_pct": 0.161},
+            "summary_text": "Carolina Hurricanes: 16.1% to win the 2026-27 Stanley Cup.",
+            "divisions": [
+                {
+                    "division_name": "Metropolitan",
+                    "conference_name": "Eastern",
+                    "teams": [
+                        {"team_abbr": "CAR", "team_name": "Carolina Hurricanes", "team_common_name": "Hurricanes", "games_played": 0, "points": 0, "projected_points": 112.7, "playoff_pct": 0.872, "cup_pct": 0.161, "is_favorite": True},
+                    ],
+                }
+            ],
+        }
+
+        markup = comparison_module._build_current_standings_board_markup(board)
+
+        self.assertIn("stanley-cup-division-window--preseason", markup)
+        self.assertIn(">Proj</div>", markup)
+        self.assertNotIn("<div>GP</div>", markup)
+        self.assertIn("stanley-cup-row-value--pts'>113</div>", markup)
+        self.assertIn("title='Cup favorite'", markup)
+
+    def test_champion_board_names_the_champion_without_odds_columns(self):
+        """Once the Cup is decided the board says who won and drops the odds columns."""
+        board = {
+            "mode": "champion",
+            "generated_at_label": "Final 2025-26 standings",
+            "season_label": "2025-26",
+            "champion_team": {"team_abbr": "CAR", "team_name": "Carolina Hurricanes", "is_champion": True},
+            "summary_text": "Carolina Hurricanes won the 2025-26 Stanley Cup.",
+            "divisions": [
+                {
+                    "division_name": "Metropolitan",
+                    "conference_name": "Eastern",
+                    "teams": [
+                        {"team_abbr": "CAR", "team_name": "Carolina Hurricanes", "team_common_name": "Hurricanes", "games_played": 82, "points": 113, "is_champion": True},
+                    ],
+                }
+            ],
+        }
+
+        markup = comparison_module._build_current_standings_board_markup(board)
+
+        self.assertIn("<strong>Carolina Hurricanes</strong> · won the 2025-26 Cup", markup)
+        self.assertIn("title='Stanley Cup champion'", markup)
+        self.assertNotIn(">Playoffs</div>", markup)
+        self.assertNotIn("Cup favorite", markup)
 
     def test_current_standings_board_rows_are_clickable_team_identity_targets(self):
         """Expose the same team-detail click payloads on standings rows."""

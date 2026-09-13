@@ -1,4 +1,4 @@
-"""Build a current-standings board with one model-based Stanley Cup favorite."""
+"""Build the current-standings board with simulated Stanley Cup odds."""
 
 from __future__ import annotations
 
@@ -7,12 +7,7 @@ import math
 import pandas as pd
 
 from nhl.constants import ACTIVE_TEAMS, current_season_year
-from nhl.win_prob import (
-    WIN_PROB_FEATURE_LABELS,
-    WIN_PROB_FEATURE_ORDER,
-    score_home_win_probability,
-    validate_model_artifact,
-)
+from nhl.team_ratings import canonical_team_abbrev
 
 _CONFERENCE_SORT_ORDER = {"Eastern": 0, "Western": 1}
 _DIVISION_SORT_ORDER = {
@@ -21,16 +16,16 @@ _DIVISION_SORT_ORDER = {
     "Central": 2,
     "Pacific": 3,
 }
-_FALLBACK_ARTIFACT = {
-    "model_version": 1,
-    "feature_order": WIN_PROB_FEATURE_ORDER,
-    "coefficients": [1.2, 0.8, 0.6, 0.5, 0.2],
-    "intercept": 0.0,
-    "scaler_mean": [0.0] * len(WIN_PROB_FEATURE_ORDER),
-    "scaler_scale": [1.0] * len(WIN_PROB_FEATURE_ORDER),
-    "selected_c": 1.0,
-    "min_games": 5,
-}
+_CONTENDER_COUNT = 5
+
+BOARD_MODE_ODDS = "odds"
+"""In-season or playoffs: real record plus playoff and Cup odds."""
+BOARD_MODE_PRESEASON = "preseason"
+"""Before opening night: projected points plus odds; last season's record is hidden."""
+BOARD_MODE_CHAMPION = "champion"
+"""The Cup is decided: final standings plus the champion."""
+BOARD_MODE_STANDINGS = "standings"
+"""No projection available: standings only."""
 
 
 def _safe_float(value: object, default: float = 0.0) -> float:
@@ -44,13 +39,24 @@ def _safe_float(value: object, default: float = 0.0) -> float:
     return numeric
 
 
-def _mean_or_default(series: pd.Series, default: float) -> float:
-    """Return the mean of valid numeric values, else the provided default."""
-    numeric = pd.to_numeric(series, errors="coerce")
-    numeric = numeric[numeric.notna()]
-    if numeric.empty:
-        return float(default)
-    return float(numeric.mean())
+def _season_span(season_year: int | None) -> str:
+    """Format a season start year as ``2026-27``."""
+    if not season_year:
+        return ""
+    return f"{int(season_year)}-{str(int(season_year) + 1)[2:]}"
+
+
+def _parse_standings_timestamp(standings_df: pd.DataFrame) -> str:
+    """Return the standings timestamp formatted for display, or an empty string."""
+    if standings_df.empty or "standingsDateTimeUtc" not in standings_df.columns:
+        return ""
+    raw_value = str(standings_df["standingsDateTimeUtc"].iloc[0] or "").strip()
+    if not raw_value:
+        return ""
+    parsed = pd.to_datetime(raw_value, utc=True, errors="coerce")
+    if pd.isna(parsed):
+        return ""
+    return parsed.strftime("%b %d, %Y %H:%M UTC")
 
 
 def _format_generated_at_label(standings_df: pd.DataFrame) -> str:
@@ -66,24 +72,14 @@ def _format_generated_at_label(standings_df: pd.DataFrame) -> str:
     Returns:
         A display label, or an empty string when no timestamp is available.
     """
-    if standings_df.empty or "standingsDateTimeUtc" not in standings_df.columns:
-        return ""
-
-    raw_value = str(standings_df["standingsDateTimeUtc"].iloc[0] or "").strip()
-    if not raw_value:
-        return ""
-
-    parsed = pd.to_datetime(raw_value, utc=True, errors="coerce")
-    if pd.isna(parsed):
+    timestamp = _parse_standings_timestamp(standings_df)
+    if not timestamp:
         return ""
 
     season_label = _format_standings_season_label(standings_df)
     if season_label:
-        return (
-            f"Final {season_label} standings — "
-            f"as of {parsed.strftime('%b %d, %Y %H:%M UTC')}"
-        )
-    return f"Current as of {parsed.strftime('%b %d, %Y %H:%M UTC')}"
+        return f"Final {season_label} standings — as of {timestamp}"
+    return f"Current as of {timestamp}"
 
 
 def _format_standings_season_label(standings_df: pd.DataFrame) -> str:
@@ -109,202 +105,163 @@ def _format_standings_season_label(standings_df: pd.DataFrame) -> str:
     season_year = season_id // 10000
     if season_year >= current_season_year():
         return ""
-    return f"{season_year}-{str(season_year + 1)[2:]}"
+    return _season_span(season_year)
 
 
-def _build_feature_frame(
-    standings_df: pd.DataFrame,
-    goalie_proxy_by_team: dict[str, float | None] | None = None,
-) -> pd.DataFrame:
-    """Normalize live standings rows into one contender-scoring table."""
-    d = standings_df.copy()
-    for text_column in ["teamAbbrev", "teamName", "teamCommonName", "conferenceName", "divisionName", "teamLogo"]:
-        if text_column not in d.columns:
-            d[text_column] = ""
-        d[text_column] = d[text_column].fillna("").astype(str).str.strip()
-    d["teamAbbrev"] = d["teamAbbrev"].str.upper()
-    d["teamName"] = d["teamName"].where(d["teamName"].ne(""), d["teamAbbrev"])
-
-    numeric_columns = [
-        "gamesPlayed",
-        "wins",
-        "losses",
-        "otLosses",
-        "points",
-        "divisionSequence",
-        "conferenceSequence",
-        "leagueSequence",
-        "pointPctg",
-        "goalDiffPerGame",
-        "l10PointPctg",
-        "l10GamesPlayed",
-        "l10GoalDifferential",
-        "PP%",
-    ]
-    for column in numeric_columns:
-        if column not in d.columns:
-            d[column] = float("nan")
-        d[column] = pd.to_numeric(d[column], errors="coerce")
-
-    l10_games = d["l10GamesPlayed"].replace(0, pd.NA)
-    d["l10GoalDiffPerGame"] = d["l10GoalDifferential"] / l10_games
-    d["goalieProxySavePct"] = d["teamAbbrev"].map(goalie_proxy_by_team or {})
-
-    league_pp = _mean_or_default(d["PP%"], 20.0)
-    league_goalie_proxy = _mean_or_default(d["goalieProxySavePct"], 0.905)
-
-    d["pp_neutralized"] = d["PP%"].isna()
-    d["goalie_neutralized"] = d["goalieProxySavePct"].isna()
-    d.loc[d["pp_neutralized"], "PP%"] = league_pp
-    d.loc[d["goalie_neutralized"], "goalieProxySavePct"] = league_goalie_proxy
-
-    return d
+def _resolve_board_mode(projection: dict) -> str:
+    """Map the season projection state onto a board display mode."""
+    state = str(projection.get("state", "") or "")
+    if state == "projection" and projection.get("teams"):
+        return BOARD_MODE_PRESEASON if projection.get("phase") == "preseason" else BOARD_MODE_ODDS
+    if state == "champion" and projection.get("champion"):
+        return BOARD_MODE_CHAMPION
+    return BOARD_MODE_STANDINGS
 
 
-def _resolve_artifact(artifact: dict | None) -> dict:
-    """Use the saved model artifact when possible, else a safe fallback."""
-    try:
-        return validate_model_artifact(artifact)
-    except Exception:
-        return validate_model_artifact(dict(_FALLBACK_ARTIFACT))
+def _build_team_payload(row: pd.Series, odds: dict, include_record: bool) -> dict:
+    """Merge one standings row with its simulated odds into the board's team shape."""
+    team_abbr = str(row.get("teamAbbrev") or "").strip().upper()
+    team_name = str(row.get("teamName") or ACTIVE_TEAMS.get(team_abbr, team_abbr)).strip()
 
+    def _record(column: str, default: float = 0.0) -> int:
+        """Return one record value, zeroed when the record belongs to another season."""
+        return int(round(_safe_float(row.get(column), default))) if include_record else 0
 
-def _build_top_drivers(contributions: dict[str, float]) -> list[str]:
-    """Return the three strongest feature drivers for one contender score."""
-    if not isinstance(contributions, dict):
-        return []
-
-    ordered_features = sorted(
-        contributions.items(),
-        key=lambda item: abs(float(item[1] or 0.0)),
-        reverse=True,
-    )
-    top_drivers: list[str] = []
-    for feature_name, contribution in ordered_features[:3]:
-        direction = "up" if float(contribution) >= 0 else "down"
-        feature_label = WIN_PROB_FEATURE_LABELS.get(feature_name, feature_name.replace("_", " "))
-        top_drivers.append(f"{feature_label} {direction}")
-    return top_drivers
+    return {
+        "team_abbr": team_abbr,
+        "team_name": team_name,
+        "team_common_name": str(row.get("teamCommonName") or "").strip(),
+        "team_logo": str(row.get("teamLogo") or "").strip(),
+        "conference_name": str(row.get("conferenceName") or "").strip(),
+        "division_name": str(row.get("divisionName") or "").strip(),
+        "games_played": _record("gamesPlayed"),
+        "wins": _record("wins"),
+        "losses": _record("losses"),
+        "ot_losses": _record("otLosses"),
+        "points": _record("points"),
+        "division_sequence": int(round(_safe_float(row.get("divisionSequence"), 999.0))),
+        "conference_sequence": int(round(_safe_float(row.get("conferenceSequence"), 999.0))),
+        "league_sequence": int(round(_safe_float(row.get("leagueSequence"), 999.0))),
+        "projected_points": float(odds.get("projected_points", 0.0)) if odds else None,
+        "points_p10": float(odds.get("points_p10", 0.0)) if odds else None,
+        "points_p90": float(odds.get("points_p90", 0.0)) if odds else None,
+        "playoff_pct": float(odds.get("make_playoffs", 0.0)) if odds else None,
+        "division_pct": float(odds.get("win_division", 0.0)) if odds else None,
+        "final_pct": float(odds.get("win_conference", 0.0)) if odds else None,
+        "cup_pct": float(odds.get("win_cup", 0.0)) if odds else None,
+        "is_favorite": False,
+        "is_champion": False,
+        "rank": 0,
+    }
 
 
 def build_stanley_cup_board(
     standings_df: pd.DataFrame,
-    artifact: dict | None,
-    goalie_proxy_by_team: dict[str, float | None] | None = None,
+    projection: dict | None = None,
 ) -> dict:
-    """Build a four-division board and pick the strongest current contender."""
-    if standings_df is None or standings_df.empty:
-        return {
-            "generated_at_label": "",
-            "favorite_team_abbr": "",
-            "favorite_team": {},
-            "teams": [],
-            "divisions": [],
-        }
+    """Build the four-division board and attach the season projection.
 
-    contender_df = _build_feature_frame(standings_df, goalie_proxy_by_team=goalie_proxy_by_team)
-    contender_df = contender_df[contender_df["teamAbbrev"].ne("")].copy()
-    if contender_df.empty:
-        return {
-            "generated_at_label": _format_generated_at_label(standings_df),
-            "favorite_team_abbr": "",
-            "favorite_team": {},
-            "teams": [],
-            "divisions": [],
-        }
+    Args:
+        standings_df: Output of ``data_loaders.get_current_nhl_standings``. Before
+            opening night this still holds last season's final table, and only its
+            division membership is used.
+        projection: Output of ``schedule.get_season_projection``.
 
-    artifact_payload = _resolve_artifact(artifact)
-    league_means = {
-        "point_pct_to_date": _mean_or_default(contender_df["pointPctg"], 0.5),
-        "goal_diff_per_game_to_date": _mean_or_default(contender_df["goalDiffPerGame"], 0.0),
-        "l10_point_pct": _mean_or_default(contender_df["l10PointPctg"], 0.5),
-        "l10_goal_diff_per_game": _mean_or_default(contender_df["l10GoalDiffPerGame"], 0.0),
-        "power_play_pct_to_date": _mean_or_default(contender_df["PP%"], 20.0),
+    Returns:
+        Board payload: display ``mode``, labels, favorite or champion, top contenders,
+        all teams (most likely champion first) and the four division tables.
+    """
+    empty_board = {
+        "generated_at_label": "",
+        "mode": BOARD_MODE_STANDINGS,
+        "season_label": "",
+        "simulation_count": 0,
+        "favorite_team_abbr": "",
+        "favorite_team": {},
+        "champion_team": {},
+        "contenders": [],
+        "summary_text": "",
+        "teams": [],
+        "divisions": [],
     }
-    league_goalie_proxy = _mean_or_default(contender_df["goalieProxySavePct"], 0.905)
+    if standings_df is None or standings_df.empty or "teamAbbrev" not in standings_df.columns:
+        return empty_board
+
+    projection = projection or {}
+    mode = _resolve_board_mode(projection)
+    season_year = int(projection.get("season_year") or current_season_year())
+    projected_teams = projection.get("teams", {}) if mode in (BOARD_MODE_ODDS, BOARD_MODE_PRESEASON) else {}
+    include_record = mode != BOARD_MODE_PRESEASON
+
+    standings = standings_df.copy()
+    standings["teamAbbrev"] = standings["teamAbbrev"].fillna("").astype(str).str.strip().str.upper()
+    standings = standings[standings["teamAbbrev"].ne("")]
+    for text_column in ("conferenceName", "divisionName"):
+        if text_column not in standings.columns:
+            standings[text_column] = ""
+        standings[text_column] = standings[text_column].fillna("").astype(str).str.strip()
 
     teams: list[dict] = []
-    for _, row in contender_df.iterrows():
-        feature_values = {
-            "point_pct_to_date": _safe_float(row.get("pointPctg")) - league_means["point_pct_to_date"],
-            "goal_diff_per_game_to_date": _safe_float(row.get("goalDiffPerGame")) - league_means["goal_diff_per_game_to_date"],
-            "l10_point_pct": _safe_float(row.get("l10PointPctg")) - league_means["l10_point_pct"],
-            "l10_goal_diff_per_game": _safe_float(row.get("l10GoalDiffPerGame")) - league_means["l10_goal_diff_per_game"],
-            "power_play_pct_to_date": _safe_float(row.get("PP%")) - league_means["power_play_pct_to_date"],
-        }
-        scored = score_home_win_probability(feature_values, artifact_payload)
+    for _, row in standings.iterrows():
+        odds = projected_teams.get(canonical_team_abbrev(row.get("teamAbbrev")), {})
+        teams.append(_build_team_payload(row, odds, include_record))
+    if not teams:
+        return empty_board
 
-        goalie_proxy = _safe_float(row.get("goalieProxySavePct"), league_goalie_proxy)
-        goalie_bonus = max(-0.04, min(0.04, (goalie_proxy - league_goalie_proxy) * 4.0))
-        contender_score = max(0.0, min(1.0, float(scored["home_win_prob"]) + goalie_bonus))
-
-        neutralized_inputs: list[str] = []
-        if bool(row.get("pp_neutralized")):
-            neutralized_inputs.append("Power play %")
-        if bool(row.get("goalie_neutralized")):
-            neutralized_inputs.append("Goalie proxy save %")
-
-        team_payload = {
-            "team_abbr": str(row.get("teamAbbrev") or "").strip().upper(),
-            "team_name": str(row.get("teamName") or ACTIVE_TEAMS.get(row.get("teamAbbrev", ""), row.get("teamAbbrev", ""))).strip(),
-            "team_common_name": str(row.get("teamCommonName") or "").strip(),
-            "team_logo": str(row.get("teamLogo") or "").strip(),
-            "conference_name": str(row.get("conferenceName") or "").strip(),
-            "division_name": str(row.get("divisionName") or "").strip(),
-            "games_played": int(round(_safe_float(row.get("gamesPlayed")))),
-            "wins": int(round(_safe_float(row.get("wins")))),
-            "losses": int(round(_safe_float(row.get("losses")))),
-            "ot_losses": int(round(_safe_float(row.get("otLosses")))),
-            "points": int(round(_safe_float(row.get("points")))),
-            "division_sequence": int(round(_safe_float(row.get("divisionSequence"), 999.0))),
-            "conference_sequence": int(round(_safe_float(row.get("conferenceSequence"), 999.0))),
-            "league_sequence": int(round(_safe_float(row.get("leagueSequence"), 999.0))),
-            "contender_score": float(contender_score),
-            "top_drivers": _build_top_drivers(scored.get("contributions", {})),
-            "neutralized_inputs": neutralized_inputs,
-            "pp_neutralized": bool(row.get("pp_neutralized")),
-            "goalie_neutralized": bool(row.get("goalie_neutralized")),
-            "summary_text": (
-                f"{str(row.get('teamName') or row.get('teamAbbrev') or '').strip()} "
-                f"owns a {contender_score * 100.0:.1f}% neutral-opponent contender score."
-            ),
-            "is_favorite": False,
-            "rank": 0,
-        }
-        teams.append(team_payload)
-
-    teams.sort(
-        key=lambda team: (
-            -float(team["contender_score"]),
-            -int(team["points"]),
-            int(team["league_sequence"]),
-            team["team_abbr"],
-        )
-    )
+    if projected_teams:
+        teams.sort(key=lambda team: (-(team["cup_pct"] or 0.0), -(team["projected_points"] or 0.0), team["team_abbr"]))
+    else:
+        teams.sort(key=lambda team: (team["league_sequence"], -team["points"], team["team_abbr"]))
     for rank, team in enumerate(teams, start=1):
         team["rank"] = rank
 
-    favorite_team = teams[0] if teams else {}
-    favorite_team_abbr = str(favorite_team.get("team_abbr", "") or "")
-    for team in teams:
-        team["is_favorite"] = team["team_abbr"] == favorite_team_abbr
+    favorite_team: dict = {}
+    if projected_teams and (teams[0]["cup_pct"] or 0.0) > 0:
+        favorite_team = teams[0]
+        favorite_team["is_favorite"] = True
 
-    divisions: list[dict] = []
-    for (conference_name, division_name), division_df in contender_df.groupby(["conferenceName", "divisionName"], sort=False):
-        division_rows: list[dict] = []
-        team_lookup = {team["team_abbr"]: team for team in teams}
-        sorted_division = division_df.sort_values(
-            ["divisionSequence", "leagueSequence", "points", "teamAbbrev"],
-            ascending=[True, True, False, True],
-            kind="stable",
-            na_position="last",
+    champion_team: dict = {}
+    if mode == BOARD_MODE_CHAMPION:
+        champion_abbr = canonical_team_abbrev(projection.get("champion"))
+        champion_team = next((team for team in teams if canonical_team_abbrev(team["team_abbr"]) == champion_abbr), {})
+        if not champion_team and champion_abbr:
+            champion_team = {"team_abbr": champion_abbr, "team_name": ACTIVE_TEAMS.get(champion_abbr, champion_abbr)}
+        if champion_team:
+            champion_team["is_champion"] = True
+
+    season_label = _season_span(season_year)
+    simulation_count = int(projection.get("n_sims", 0) or 0) if projected_teams else 0
+    contenders = [
+        {"team_abbr": team["team_abbr"], "team_name": team["team_name"], "team_common_name": team["team_common_name"], "cup_pct": team["cup_pct"]}
+        for team in teams[:_CONTENDER_COUNT]
+    ] if projected_teams else []
+
+    summary_text = ""
+    if favorite_team:
+        summary_text = (
+            f"{favorite_team['team_name']}: {favorite_team['cup_pct'] * 100.0:.1f}% to win the "
+            f"{season_label} Stanley Cup, from {simulation_count:,} simulations of the remaining "
+            "schedule and playoff bracket."
         )
-        for _, row in sorted_division.iterrows():
-            team_abbr = str(row.get("teamAbbrev") or "").strip().upper()
-            team_payload = team_lookup.get(team_abbr)
-            if team_payload is not None:
-                division_rows.append(team_payload)
+    elif champion_team:
+        summary_text = f"{champion_team['team_name']} won the {season_label} Stanley Cup."
 
+    timestamp = _parse_standings_timestamp(standings)
+    if mode == BOARD_MODE_PRESEASON:
+        generated_at_label = f"{season_label} preseason projection — updated {timestamp}" if timestamp else f"{season_label} preseason projection"
+    elif mode == BOARD_MODE_CHAMPION:
+        generated_at_label = f"Final {season_label} standings — as of {timestamp}" if timestamp else f"Final {season_label} standings"
+    else:
+        generated_at_label = _format_generated_at_label(standings)
+
+    team_lookup = {team["team_abbr"]: team for team in teams}
+    divisions: list[dict] = []
+    for (conference_name, division_name), division_df in standings.groupby(["conferenceName", "divisionName"], sort=False):
+        division_rows = [team_lookup[abbr] for abbr in division_df["teamAbbrev"] if abbr in team_lookup]
+        if mode == BOARD_MODE_PRESEASON:
+            division_rows.sort(key=lambda team: (-(team["projected_points"] or 0.0), team["team_abbr"]))
+        else:
+            division_rows.sort(key=lambda team: (team["division_sequence"], team["league_sequence"], -team["points"], team["team_abbr"]))
         divisions.append(
             {
                 "conference_name": str(conference_name or "").strip(),
@@ -322,9 +279,15 @@ def build_stanley_cup_board(
     )
 
     return {
-        "generated_at_label": _format_generated_at_label(contender_df),
-        "favorite_team_abbr": favorite_team_abbr,
+        "generated_at_label": generated_at_label,
+        "mode": mode,
+        "season_label": season_label,
+        "simulation_count": simulation_count,
+        "favorite_team_abbr": str(favorite_team.get("team_abbr", "") or ""),
         "favorite_team": favorite_team,
+        "champion_team": champion_team,
+        "contenders": contenders,
+        "summary_text": summary_text,
         "teams": teams,
         "divisions": divisions,
     }

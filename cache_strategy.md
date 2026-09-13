@@ -52,8 +52,13 @@ These are the biggest wins. Once fetched, they should never be re-fetched until 
 | `get_season_leaderboard(cat, yr, type)` [past season] | `leaderboard:{cat}:{yr}:{type}` | 24h | **Disk** | 50–100 KB | Immutable once season closes. |
 | `get_player_season_game_log(pid, name, yr)` [past season] | `player_gamelog:{pid}:{yr}` | 24h | **Disk** | 30–50 KB | Immutable once season closes. |
 | `get_team_season_game_log(abbr, yr)` [past season] | `team_gamelog:{abbr}:{yr}` | 24h | **Disk** | 10–20 KB | Immutable once season closes. |
+| `get_league_game_table(yr)` [past season] | `league_team_games:summary:{season_id}:{2\|3}`, `league_team_games:summaryshooting:{season_id}:2` | 24h | **Disk** | ~1.5 MB raw per season | Three league-wide requests per season. Ratings replay three closed seasons, so these are what make `get_current_team_ratings()` cheap after the first call. |
+| `get_league_schedule(yr)` [past season] | `league_schedule:{season_id}` | 24h | **Disk** | ~250 KB | Every game of a season in one request. |
+| `get_playoff_bracket(yr)` [past season] | `playoff_bracket:{end_year}` | 24h | **Disk** | ~40 KB | Used to name last season's champion over the summer. |
 
 **Total disk footprint for T1**: ~10–15 MB. Trivial.
+
+Not part of this cache: `.cache/xg_training/` is a trainer-only store of parsed play-by-play shots (~14 MB) written by `train_win_prob.py --phase2-report`. The app never reads it, and raw play-by-play payloads (~300 KB each) must never go through `NHLClient`'s cache.
 
 ---
 
@@ -71,6 +76,12 @@ These are the biggest wins. Once fetched, they should never be re-fetched until 
 | `get_team_season_game_log(abbr, yr)` [current season] | `team_gamelog:{abbr}:{yr}` | 1h | **Disk** | 10–20 KB | Same split. |
 | `_get_cached_club_stats(abbr)` | `club_stats:{abbr}` | 2h | **Disk** | ~10 KB | Per-team current-season roster stats. |
 | `search_player(query)` | `search:{query_normalized}` | 2h | **Disk** | ~5 KB | Search results shift slowly. Normalize query (lowercase, stripped). |
+| `get_league_game_table(yr)` [current season] | same keys as T1 | 1h | **Disk** | grows to ~1.5 MB | Completed games only; refreshes after each game night. |
+| `get_league_schedule(yr)` [current season] | `league_schedule:{season_id}` | 1h | **Disk** | ~250 KB | Game states and postponements. |
+| `get_playoff_bracket(yr)` [current season] | `playoff_bracket:{end_year}` | 1h disk, 15 min `st.cache_data` | **Disk** | ~40 KB | Live series state during the playoffs. |
+| `get_current_team_ratings(yr)` | `st.cache_data` only | 30 min | In-process | ~5 KB | Elo + shrunk form snapshot for all 32 teams plus the league `scoring_environment`, shared by prediction cards (win probability and 60-minute / puck-line markets) and the simulator. |
+| `get_season_projection()` | `st.cache_data` only | 1h, warmed by `cache_warmer` seasonal cycle | In-process | ~10 KB | 10,000 simulated seasons (~0.5 s warm). Seeded from the standings timestamp so reruns are identical. |
+| `get_stanley_cup_board()` | `st.cache_data` only | 1h | In-process | ~30 KB | Standings + projection merged for the Current Standings tab. |
 
 **Total disk footprint for T2**: ~5–15 MB active, rotating.
 
@@ -83,7 +94,9 @@ These are the biggest wins. Once fetched, they should never be re-fetched until 
 | `get_live_or_recent_game()` | `live_game` | 2 min | **In-memory shared** | ~1 KB | All users see the same featured game. Short TTL for liveness. |
 | `get_upcoming_games(limit, days)` | `upcoming:{limit}:{days}` | 5 min | **In-memory shared** | ~18 KB | Schedule doesn't change within minutes. |
 | `get_game_details(date, gid)` | `game_detail:{date}:{gid}` | 2 min during game day, 24h for past dates | **Disk** (past) / **In-memory** (today) | ~2 KB | Past game details are immutable. |
-| `get_game_win_probabilities(away, home)` | `win_prob:{away}:{home}` | 5 min | **In-memory shared** | ~1 KB | Depends on latest team stats. |
+| `get_game_win_probabilities(away, home, game_id, game_type)` | `st.cache_data` only | 5 min | In-process | ~1 KB | Scores from `get_current_team_ratings()`; no per-matchup HTTP any more. |
+| partner odds (`capture_prediction_ledger`) | `partner_odds:{country}` | 2 min | **Disk** | ~6 KB each | Five free NHL betting-partner feeds read by the warmer for the ledger's market benchmark. |
+| `get_track_record()` | `st.cache_data` only | 10 min | In-process | ~1 KB | Reads the prediction ledger (SQLite, read-only). The ledger itself is durable storage in `PUCKPEAK_DATA_DIR`, not a cache: never evict or TTL it. |
 | `get_featured_players(home, away)` | `featured:{home}:{away}` | 5 min | **In-memory shared** | ~2 KB | Derived from club stats. |
 | `get_matchup_history(away, home, limit)` | `matchup_hist:{away}:{home}:{limit}` | 1h | **Disk** | ~30 KB | Historical matchups don't change quickly. Bump from 5m to 1h. |
 

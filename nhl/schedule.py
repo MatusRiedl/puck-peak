@@ -1,6 +1,8 @@
-"""Live schedule helpers for defaults, upcoming games, and featured players."""
+"""Live schedule helpers: defaults, upcoming games, featured players and model inference."""
 
 import logging
+import zlib
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -11,19 +13,46 @@ from nhl.api import get_client
 from nhl.cache import T1_TTL, T2_DEFAULT_TTL, T3_DEFAULT_TTL
 from nhl.constants import (
     ACTIVE_TEAMS,
+    PARTNER_ODDS_URL,
     TEAM_LINEAGES,
     current_season_year,
-    previous_season_year,
 )
 from nhl.data_loaders import (
+    get_current_nhl_standings,
+    get_league_game_table,
+    get_league_schedule,
+    get_playoff_bracket,
     get_team_available_nhl_seasons,
     get_team_season_game_log,
     load_win_prob_weights,
 )
+from nhl.goal_model import DEFAULT_GOAL_MODEL, current_scoring_environment, game_markets
+from nhl.ledger import (
+    MIN_GRADED_GAMES_FOR_RECORD,
+    connect_ledger,
+    grade_predictions,
+    load_ledger,
+    parse_partner_odds,
+    prediction_row,
+    record_market_odds,
+    record_prediction,
+    track_record,
+)
+from nhl.season_sim import (
+    parse_playoff_bracket,
+    remaining_regular_season_games,
+    simulate_season,
+    teams_from_standings,
+)
+from nhl.team_ratings import (
+    REGULAR_SEASON,
+    back_to_back_flags,
+    current_team_snapshot,
+    matchup_feature_values,
+    season_year_from_game_id,
+)
 from nhl.win_prob import (
-    MIN_GAMES_FOR_ESTIMATE,
     WIN_PROB_FEATURE_LABELS,
-    build_matchup_snapshot,
     get_top_feature_driver,
     score_home_win_probability,
 )
@@ -67,6 +96,15 @@ _TEAM_ALIAS_TO_ACTIVE = {
     for active_abbr, aliases in TEAM_LINEAGES.items()
     for alias in aliases
 }
+_RATING_WARMUP_SEASONS = 3
+"""Completed seasons replayed before the target season so Elo ratings have settled."""
+_EARLY_SEASON_GAMES = 10
+"""Below this many games played, a team's rating still leans mostly on last season."""
+_SIMULATION_COUNT = 10_000
+_LEDGER_CAPTURE_HOURS = 36
+"""Games starting within this window get their prediction logged (and refreshed until puck drop)."""
+_PARTNER_ODDS_COUNTRIES = ("CA", "US", "SE", "FI", "CZ")
+"""NHL.com betting-partner feeds read for the market benchmark (free; no key, no payment)."""
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +223,8 @@ def get_upcoming_games(limit: int = 6, days_ahead: int = 60) -> list[dict]:
             game["pregame_win_prob"] = get_game_win_probabilities(
                 game["away_abbr"],
                 game["home_abbr"],
+                game.get("game_id", 0),
+                game.get("game_type", 2),
             )
         return trimmed_games
     except Exception:
@@ -317,12 +357,91 @@ def get_featured_players(home_abbr: str, away_abbr: str) -> dict:
         return {"players": {}, "teams": {}}
 
 
+@st.cache_data(ttl=1800)
+def get_current_team_ratings(season_year: int | None = None) -> dict:
+    """Return one rating snapshot for every team, shared by predictions and the Cup board.
+
+    Elo needs history to settle, so the snapshot replays ``_RATING_WARMUP_SEASONS``
+    completed seasons before the target season. Those come from the 24-hour disk cache,
+    so a warm call only refetches the current season's three league-wide reports.
+
+    Args:
+        season_year: Season to rate. Defaults to the current season.
+
+    Returns:
+        ``{"season_year": int, "teams": {abbr: snapshot}, "scoring_environment": float | None}``,
+        or ``{}`` when the model artifact or the game data is unavailable.
+        ``scoring_environment`` is the league's regulation goals per team-game that the
+        goal model prices markets with.
+    """
+    artifact = load_win_prob_weights()
+    if not artifact:
+        return {}
+
+    target_season = int(season_year) if season_year else current_season_year()
+    frames = [
+        get_league_game_table(year)
+        for year in range(target_season - _RATING_WARMUP_SEASONS, target_season + 1)
+    ]
+    frames = [frame for frame in frames if frame is not None and not frame.empty]
+    if not frames:
+        return {}
+
+    games = pd.concat(frames, ignore_index=True)
+    teams = current_team_snapshot(games, target_season, artifact["rating_params"])
+    if not teams:
+        return {}
+    goal_model = artifact.get("goal_model") or DEFAULT_GOAL_MODEL
+    return {
+        "season_year": target_season,
+        "teams": teams,
+        "scoring_environment": current_scoring_environment(games, target_season, goal_model["environment_prior_team_games"]),
+    }
+
+
+@st.cache_data(ttl=3600)
+def _get_schedule_back_to_back_flags(season_year: int) -> dict[int, tuple[bool, bool]]:
+    """Return ``game_id -> (home on back-to-back, away on back-to-back)`` for one season."""
+    flags = back_to_back_flags(get_league_schedule(int(season_year)))
+    return {
+        int(row.GameId): (bool(row.HomeBackToBack), bool(row.AwayBackToBack))
+        for row in flags.itertuples(index=False)
+    }
+
+
 @st.cache_data(ttl=300)
-def get_game_win_probabilities(away_abbr: str, home_abbr: str) -> dict | None:
-    """Return one runtime-only pregame win-probability estimate for a matchup."""
-    clean_away_abbr = str(away_abbr or "").strip().upper()
-    clean_home_abbr = str(home_abbr or "").strip().upper()
-    if not clean_away_abbr or not clean_home_abbr:
+def get_game_win_probabilities(
+    away_abbr: str,
+    home_abbr: str,
+    game_id: int = 0,
+    game_type: int = REGULAR_SEASON,
+) -> dict | None:
+    """Return one pregame win-probability estimate for a regular-season or playoff game.
+
+    Preseason and other exhibition games get ``None``. Their lineups are mostly
+    prospects, so a regular-season model has nothing honest to say about them.
+
+    Args:
+        away_abbr: Away team abbreviation.
+        home_abbr: Home team abbreviation.
+        game_id: NHL game id. It supplies the season and the back-to-back lookup.
+        game_type: NHL game type (1 preseason, 2 regular season, 3 playoffs).
+
+    Returns:
+        Percentages, raw probabilities, fair decimal odds, a one-line model driver
+        label, games played and back-to-back flags. When the artifact carries a goal
+        model it also returns ``markets``: the 60-minute result and the puck line. Totals
+        are never included; they failed their backtest. ``None`` when no estimate can
+        be made.
+    """
+    clean_away_abbr = _canonical_team_abbr(away_abbr)
+    clean_home_abbr = _canonical_team_abbr(home_abbr)
+    if not clean_away_abbr or not clean_home_abbr or clean_away_abbr == clean_home_abbr:
+        return None
+    try:
+        if int(game_type or 0) not in _VALID_GAME_TYPES:
+            return None
+    except (TypeError, ValueError):
         return None
 
     artifact = load_win_prob_weights()
@@ -330,72 +449,220 @@ def get_game_win_probabilities(away_abbr: str, home_abbr: str) -> dict | None:
         return None
 
     try:
-        min_games = int(artifact.get("min_games", MIN_GAMES_FOR_ESTIMATE))
-
-        # Try the current season first, then fall back to the previous one. Both teams
-        # need min_games played before a snapshot can be built, so from the offseason
-        # through roughly the first two weeks of a season the current year yields
-        # nothing — without the fallback every card reads "Estimate unavailable" for
-        # the stretch when interest in the app is highest.
-        matchup_snapshot = None
-        season_used = current_season_year()
-        for candidate_year in (current_season_year(), previous_season_year()):
-            away_regular = _filter_regular_season_games(
-                get_team_season_game_log(clean_away_abbr, candidate_year)
-            )
-            home_regular = _filter_regular_season_games(
-                get_team_season_game_log(clean_home_abbr, candidate_year)
-            )
-            matchup_snapshot = build_matchup_snapshot(
-                home_regular,
-                away_regular,
-                min_games=min_games,
-            )
-            if matchup_snapshot is not None:
-                season_used = candidate_year
-                break
-        if matchup_snapshot is None:
+        season_year = season_year_from_game_id(game_id) or current_season_year()
+        ratings = get_current_team_ratings(season_year)
+        teams = ratings.get("teams", {}) if ratings else {}
+        home_entry = teams.get(clean_home_abbr)
+        away_entry = teams.get(clean_away_abbr)
+        if home_entry is None or away_entry is None:
             return None
 
+        home_back_to_back, away_back_to_back = (
+            _get_schedule_back_to_back_flags(season_year).get(int(game_id), (False, False))
+            if game_id
+            else (False, False)
+        )
         scored_probability = score_home_win_probability(
-            matchup_snapshot["feature_values"],
+            matchup_feature_values(home_entry, away_entry, home_back_to_back, away_back_to_back),
             artifact,
         )
-        base_home_prob = float(scored_probability["home_win_prob"])
-        model_label = _build_model_label(
-            clean_away_abbr,
-            clean_home_abbr,
-            scored_probability,
-        )
-
-        away_club_stats = _get_cached_club_stats(clean_away_abbr) or {}
-        home_club_stats = _get_cached_club_stats(clean_home_abbr) or {}
-        goalie_adjustment, goalie_data_available = _compute_goalie_probability_adjustment(
-            home_goalies=home_club_stats.get("goalies", []),
-            away_goalies=away_club_stats.get("goalies", []),
-        )
-        final_home_prob = min(max(base_home_prob + goalie_adjustment, 0.0), 1.0)
-        home_pct = int(round(final_home_prob * 100.0))
-        home_pct = min(max(home_pct, 0), 100)
-        away_pct = 100 - home_pct
+        home_prob = min(max(float(scored_probability["home_win_prob"]), 0.001), 0.999)
+        home_pct = min(max(int(round(home_prob * 100.0)), 0), 100)
+        home_games = int(home_entry.get("games_played", 0) or 0)
+        away_games = int(away_entry.get("games_played", 0) or 0)
 
         return {
-            "away_pct": away_pct,
+            "away_pct": 100 - home_pct,
             "home_pct": home_pct,
-            "model_label": model_label,
-            "goalie_label": _build_goalie_label(
-                away_abbr=clean_away_abbr,
-                home_abbr=clean_home_abbr,
-                adjustment=goalie_adjustment,
-                goalie_data_available=goalie_data_available,
-            ),
-            "base_home_pct": int(round(base_home_prob * 100.0)),
-            "base_away_pct": 100 - int(round(base_home_prob * 100.0)),
-            "season_used": season_used,
-            "is_prior_season": season_used != current_season_year(),
+            "home_win_prob": home_prob,
+            "away_win_prob": 1.0 - home_prob,
+            "fair_odds_home": round(1.0 / home_prob, 2),
+            "fair_odds_away": round(1.0 / (1.0 - home_prob), 2),
+            "model_label": _build_model_label(clean_away_abbr, clean_home_abbr, scored_probability),
+            "home_games_played": home_games,
+            "away_games_played": away_games,
+            "early_season": int(game_type) == REGULAR_SEASON and min(home_games, away_games) < _EARLY_SEASON_GAMES,
+            "home_back_to_back": bool(home_back_to_back),
+            "away_back_to_back": bool(away_back_to_back),
+            "season_used": season_year,
+            "model_version": int(artifact.get("model_version", 0) or 0),
+            "markets": game_markets(home_prob, ratings.get("scoring_environment"), artifact.get("goal_model")),
         }
     except Exception:
         return None
+
+
+@st.cache_data(ttl=3600)
+def get_season_projection() -> dict:
+    """Simulate the rest of the current season and playoffs for the Cup odds board.
+
+    Returns:
+        A dict whose ``state`` is one of:
+
+        - ``projection``: ``teams`` maps each team to its projected points and playoff
+          milestone odds. ``phase`` is ``preseason``, ``regular_season`` or ``playoffs``.
+        - ``champion``: the Cup is decided and ``champion`` names the winner of
+          ``season_year``. This covers the summer before the rollover.
+        - ``unavailable``: the model, standings or schedule could not be loaded.
+    """
+    season_year = current_season_year()
+    unavailable = {"state": "unavailable", "season_year": season_year, "teams": {}}
+    artifact = load_win_prob_weights()
+    if not artifact:
+        return unavailable
+
+    try:
+        bracket = parse_playoff_bracket(get_playoff_bracket(season_year))
+        if bracket["champion"]:
+            return {"state": "champion", "season_year": season_year, "champion": bracket["champion"], "teams": {}}
+
+        standings_df = get_current_nhl_standings()
+        schedule = get_league_schedule(season_year)
+        if standings_df.empty or schedule.empty:
+            previous = parse_playoff_bracket(get_playoff_bracket(season_year - 1))
+            if previous["champion"]:
+                return {"state": "champion", "season_year": season_year - 1, "champion": previous["champion"], "teams": {}}
+            return unavailable
+
+        standings_season = 0
+        if "seasonId" in standings_df.columns:
+            standings_season = int(pd.to_numeric(standings_df["seasonId"], errors="coerce").fillna(0).iloc[0]) // 10000
+        in_season = standings_season == season_year
+        teams = teams_from_standings(standings_df, include_record=in_season)
+        ratings = get_current_team_ratings(season_year)
+        if not teams or not ratings:
+            return unavailable
+
+        completed = get_league_game_table(season_year)
+        completed_ids = (
+            set(completed.loc[completed["GameTypeId"].eq(REGULAR_SEASON), "GameId"].astype(int))
+            if not completed.empty
+            else set()
+        )
+        remaining = remaining_regular_season_games(schedule, completed_ids)
+        regular_total = int(schedule["GameTypeId"].eq(REGULAR_SEASON).sum())
+        progress = 1.0 - len(remaining) / regular_total if regular_total else 0.0
+        standings_stamp = str(standings_df["standingsDateTimeUtc"].iloc[0]) if "standingsDateTimeUtc" in standings_df.columns else ""
+        # Seeded from the data it simulates, so reruns show identical numbers until
+        # a game finishes.
+        seed = zlib.crc32(f"{season_year}:{standings_stamp}:{len(remaining)}".encode("utf-8"))
+
+        result = simulate_season(
+            teams,
+            ratings.get("teams", {}),
+            remaining,
+            artifact,
+            bracket=bracket,
+            season_progress=progress,
+            n_sims=_SIMULATION_COUNT,
+            seed=seed,
+        )
+        if not in_season:
+            phase = "preseason"
+        elif bracket["round_one_complete"]:
+            phase = "playoffs"
+        else:
+            phase = "regular_season"
+        return {
+            "state": "projection",
+            "phase": phase,
+            "season_year": season_year,
+            "n_sims": result["n_sims"],
+            "teams": result["teams"],
+        }
+    except Exception:
+        log.exception("Season projection failed")
+        return unavailable
+
+
+def capture_prediction_ledger(now_utc: datetime | None = None) -> dict:
+    """Log upcoming predictions and market prices until puck drop, then grade finished games.
+
+    Runs from the cache warmer's live cycle. Each pass refreshes the rows of games that
+    have not started, so the ledger keeps the last pregame numbers and the market's
+    near-closing prices; rows are frozen at puck drop (see ``nhl.ledger``). Market prices
+    come from the NHL API's free partner-odds feeds and are never displayed.
+
+    Args:
+        now_utc: Capture time; defaults to now.
+
+    Returns:
+        Counts of predictions written, market rows written and predictions graded.
+    """
+    now = now_utc or datetime.now(timezone.utc)
+    summary = {"predictions": 0, "market_rows": 0, "graded": 0}
+    artifact = load_win_prob_weights()
+    if not artifact:
+        return summary
+
+    client = get_client()
+    scoreboard = client.get(url=_SCOREBOARD_URL, cache_key="scoreboard", ttl=T3_DEFAULT_TTL, timeout=5)
+    upcoming: list[dict] = []
+    for day in (scoreboard or {}).get("gamesByDate", []) or []:
+        upcoming.extend(_extract_upcoming_games(day.get("games", []) or [], now))
+    horizon = now + timedelta(hours=_LEDGER_CAPTURE_HOURS)
+
+    with closing(connect_ledger()) as connection:
+        for game in upcoming:
+            start = _parse_utc_timestamp(game.get("start_time_utc"))
+            if game.get("game_type") not in _VALID_GAME_TYPES or start is None or start > horizon:
+                continue
+            probability = get_game_win_probabilities(game["away_abbr"], game["home_abbr"], game["game_id"], game["game_type"])
+            if not probability:
+                continue
+            row = prediction_row(game, probability, artifact.get("generated_at_utc", ""))
+            summary["predictions"] += int(record_prediction(connection, row, now))
+
+        odds_rows: list[dict] = []
+        for country in _PARTNER_ODDS_COUNTRIES:
+            payload = client.get(
+                url=PARTNER_ODDS_URL.format(country),
+                cache_key=f"partner_odds:{country}",
+                ttl=T3_DEFAULT_TTL,
+                timeout=10,
+            )
+            odds_rows.extend(row for row in parse_partner_odds(payload) if row.get("game_type") in _VALID_GAME_TYPES)
+        summary["market_rows"] = record_market_odds(connection, odds_rows, now)
+
+        season = current_season_year()
+        tables = [get_league_game_table(year) for year in (season - 1, season)]
+        tables = [table for table in tables if table is not None and not table.empty]
+        if tables:
+            summary["graded"] = grade_predictions(connection, pd.concat(tables, ignore_index=True), now)
+    return summary
+
+
+@st.cache_data(ttl=600)
+def get_track_record() -> dict:
+    """Return this season's live ledger record and the model's backtest summary.
+
+    Returns:
+        ``season_year``, ``live`` (``nhl.ledger.track_record`` output), ``backtest``
+        (games, accuracy and log loss pooled over the artifact's test seasons, or
+        ``None``) and ``min_games``, the graded-game count before the live record is shown.
+    """
+    season = current_season_year()
+    try:
+        predictions, market_odds = load_ledger()
+        live = track_record(predictions, market_odds, season)
+    except Exception:
+        log.exception("Reading the prediction ledger failed")
+        live = {"logged": 0, "games": 0}
+
+    backtest = None
+    artifact = load_win_prob_weights()
+    folds = ((artifact or {}).get("validation_metrics") or {}).get("backtest") or []
+    folds = [fold for fold in folds if isinstance(fold, dict) and isinstance(fold.get("model"), dict)]
+    if folds:
+        games = sum(int(fold["model"]["n"]) for fold in folds)
+        backtest = {
+            "first_season": min(int(fold["season"]) for fold in folds),
+            "last_season": max(int(fold["season"]) for fold in folds),
+            "games": games,
+            "accuracy": sum(float(fold["model"]["accuracy"]) * int(fold["model"]["n"]) for fold in folds) / games,
+            "log_loss": sum(float(fold["model"]["log_loss"]) * int(fold["model"]["n"]) for fold in folds) / games,
+        }
+    return {"season_year": season, "live": live, "backtest": backtest, "min_games": MIN_GRADED_GAMES_FOR_RECORD}
 
 
 # ---------------------------------------------------------------------------
@@ -763,44 +1030,23 @@ def _select_best_goalie(goalies: list[dict]) -> dict | None:
     )
 
 
-def _filter_regular_season_games(team_games: pd.DataFrame | None) -> pd.DataFrame:
-    """Return only regular-season rows from a team game-log DataFrame."""
-    if team_games is None or team_games.empty:
-        return pd.DataFrame()
-    d = team_games.copy()
-    if "GameType" in d.columns:
-        d = d[d["GameType"].astype(str).str.strip().eq("Regular")]
-    return d.reset_index(drop=True)
-
-
 def _build_model_label(away_abbr: str, home_abbr: str, scored_probability: dict) -> str:
     """Build one short runtime label from the strongest model contribution."""
     base_home_prob = float(scored_probability.get("home_win_prob", 0.5))
     if abs(base_home_prob - 0.5) < 0.02:
-        return "Base model: near toss-up."
+        return "Model: near toss-up."
 
     top_feature, contribution = get_top_feature_driver(scored_probability)
     if not top_feature or abs(contribution) < 0.01:
-        return "Base model: modest edge from team form."
+        return "Model: modest edge from team form."
+
+    if top_feature in ("home_back_to_back", "away_back_to_back"):
+        tired_abbr = home_abbr if top_feature == "home_back_to_back" else away_abbr
+        return f"Model: {tired_abbr} on the second night of a back-to-back."
 
     feature_label = WIN_PROB_FEATURE_LABELS.get(top_feature, top_feature.replace("_", " "))
     edge_abbr = home_abbr if contribution >= 0 else away_abbr
-    return f"Base model: {edge_abbr} edge from {feature_label}."
-
-
-def _build_goalie_label(
-    away_abbr: str,
-    home_abbr: str,
-    adjustment: float,
-    goalie_data_available: bool,
-) -> str:
-    """Describe the goalie overlay in a short, honest label."""
-    if not goalie_data_available:
-        return "Goalie proxy unavailable."
-    if abs(float(adjustment)) < 0.005:
-        return "Goalie proxy: no material goalie edge."
-    edge_abbr = home_abbr if adjustment > 0 else away_abbr
-    return f"Goalie proxy: {edge_abbr} +{abs(adjustment) * 100.0:.1f} pts from save% edge."
+    return f"Model: {edge_abbr} edge from {feature_label}."
 
 
 def _coerce_save_percentage(value: object) -> float:
@@ -812,57 +1058,6 @@ def _coerce_save_percentage(value: object) -> float:
     if numeric_value > 1.5:
         numeric_value = numeric_value / 100.0
     return max(0.0, min(numeric_value, 1.0))
-
-
-def _aggregate_team_save_percentage(goalies: list[dict]) -> float | None:
-    """Return the aggregate team save percentage from club-stats goalie rows."""
-    if not goalies:
-        return None
-
-    total_saves = 0.0
-    total_shots_against = 0.0
-    weighted_total = 0.0
-    weighted_games = 0.0
-    for goalie in goalies:
-        saves = float(goalie.get("saves", 0.0) or 0.0)
-        shots_against = float(goalie.get("shotsAgainst", 0.0) or 0.0)
-        save_percentage = _coerce_save_percentage(goalie.get("savePercentage", 0.0))
-        games_played = float(goalie.get("gamesPlayed", 0.0) or 0.0)
-        if shots_against > 0 and saves >= 0:
-            total_saves += saves
-            total_shots_against += shots_against
-        elif save_percentage > 0 and games_played > 0:
-            weighted_total += save_percentage * games_played
-            weighted_games += games_played
-
-    if total_shots_against > 0:
-        return total_saves / total_shots_against
-    if weighted_games > 0:
-        return weighted_total / weighted_games
-    return None
-
-
-def _build_goalie_proxy_save_percentage(goalies: list[dict]) -> float | None:
-    """Shrink the selected goalie toward the team aggregate save percentage."""
-    selected_goalie = _select_best_goalie(goalies)
-    if selected_goalie is None:
-        return None
-
-    selected_save_pct = _coerce_save_percentage(selected_goalie.get("savePercentage", 0.0))
-    team_save_pct = _aggregate_team_save_percentage(goalies)
-    games_played = max(float(selected_goalie.get("gamesPlayed", 0.0) or 0.0), 0.0)
-    shrink_weight = min(games_played / 25.0, 1.0)
-    baseline = team_save_pct if team_save_pct is not None else selected_save_pct
-    return baseline + (selected_save_pct - baseline) * shrink_weight
-
-
-def _compute_goalie_probability_adjustment(home_goalies: list[dict], away_goalies: list[dict]) -> tuple[float, bool]:
-    """Convert goalie proxy save-percentage edge into a capped probability delta."""
-    home_proxy = _build_goalie_proxy_save_percentage(home_goalies)
-    away_proxy = _build_goalie_proxy_save_percentage(away_goalies)
-    if home_proxy is None or away_proxy is None:
-        return 0.0, False
-    return max(-0.04, min(0.04, (home_proxy - away_proxy) * 4.0)), True
 
 
 @st.cache_data(ttl=3600)

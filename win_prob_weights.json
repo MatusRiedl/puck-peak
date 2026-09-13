@@ -1,95 +1,600 @@
 {
-  "model_version": 1,
+  "model_version": 2,
   "model_type": "logistic_regression",
-  "generated_at_utc": "2026-03-08T00:28:12.196777Z",
   "feature_order": [
-    "point_pct_to_date",
-    "goal_diff_per_game_to_date",
-    "l10_point_pct",
-    "l10_goal_diff_per_game",
-    "power_play_pct_to_date"
+    "elo_diff",
+    "goal_diff_shrunk_diff",
+    "sat_share_shrunk_diff",
+    "sog_share_shrunk_diff",
+    "home_back_to_back",
+    "away_back_to_back"
   ],
   "coefficients": [
-    0.2161043032617595,
-    0.17328588988641713,
-    -0.08779942343786866,
-    0.09631803970575331,
-    0.07983496359930344
+    0.26664284936666965,
+    0.057413167432451485,
+    0.05073133400036976,
+    0.1427339218606106,
+    -0.1005639038716922,
+    0.12868761633396128
   ],
-  "intercept": 0.014719329751842593,
+  "intercept": 0.15329254634458578,
   "scaler_mean": [
-    -0.0002458097329363444,
-    -0.0017505942670526789,
-    -0.0007162673990526993,
-    -0.012874252332666257,
-    -0.009469490467810477
+    -0.31911227419408794,
+    -0.009341806827782816,
+    -0.0002395273012688042,
+    -0.0003525138586967866,
+    0.10683979143236888,
+    0.2085676311215622
   ],
   "scaler_scale": [
-    0.18340998665169053,
-    1.0750336590739638,
-    0.24997563992553085,
-    1.4436614350011825,
-    8.555388133632361
+    73.44543619436516,
+    0.7883420737220282,
+    0.039376796525727,
+    0.037662548178850896,
+    0.3089094533986566,
+    0.4062845977512588
   ],
-  "selected_c": 0.1,
-  "min_games": 5,
+  "selected_c": 0.05,
+  "rating_params": {
+    "elo_k": 6.0,
+    "elo_home_advantage": 25.0,
+    "elo_carryover": 0.8,
+    "form_prior_weight": 8.0,
+    "goal_diff_prior_keep": 0.5,
+    "share_prior_keep": 0.6
+  },
+  "overtime_model": {
+    "intercept": -1.1356296337699356,
+    "abs_logit_coef": -0.2954691434687082,
+    "shootout_share": 0.327816091954023,
+    "overtime_rate": 0.22236990082813618
+  },
+  "simulation": {
+    "strength_sd_preseason": 0.4,
+    "strength_sd_late": 0.1
+  },
+  "goal_model": {
+    "rate_scale": 0.9807723558179374,
+    "tie_inflation": 0.4795663880510831,
+    "lead1_transfer": 0.31206861067142516,
+    "lead2_transfer": 0.46460493047497997,
+    "overtime_intercept": -0.03998946809914794,
+    "overtime_logit_coef": 0.387869663176908,
+    "environment_prior_team_games": 400.0,
+    "fallback_goals_per_team_game": 3.0,
+    "version": 1
+  },
+  "generated_at_utc": "2026-09-13T17:36:23.861559Z",
   "training_seasons": [
+    2018,
+    2019,
     2020,
     2021,
     2022,
     2023,
-    2024
+    2024,
+    2025
   ],
-  "training_rows": 5687,
-  "home_win_rate": 0.5034288728679445,
+  "warmup_seasons": [
+    2017
+  ],
+  "training_rows": 9781,
+  "home_win_rate": 0.5363459768939781,
   "validation_metrics": {
-    "validation_season": 2024,
-    "candidates": [
+    "method": "rolling-origin; hyperparameters and weights fitted on seasons before each test season",
+    "backtest": [
       {
-        "c": 0.1,
-        "log_loss": 0.6826292276992489,
-        "brier_score": 0.24461666208436328
+        "season": 2021,
+        "model": {
+          "n": 1312,
+          "log_loss": 0.6450352493568318,
+          "brier": 0.2266546307319561,
+          "accuracy": 0.631859756097561
+        },
+        "constant_home_rate": {
+          "n": 1312,
+          "log_loss": 0.6904755997292907,
+          "brier": 0.24866538712820144,
+          "accuracy": 0.5365853658536586
+        },
+        "same_games_model": {
+          "n": 1226,
+          "log_loss": 0.6424603606967998,
+          "brier": 0.22539769683863004,
+          "accuracy": 0.6386623164763459
+        },
+        "same_games_previous_design": {
+          "n": 1226,
+          "log_loss": 0.662425650438858,
+          "brier": 0.23484249169300841,
+          "accuracy": 0.6150081566068516
+        },
+        "playoffs": {
+          "n": 89,
+          "log_loss": 0.6659058800508656,
+          "brier": 0.23665011511510617,
+          "accuracy": 0.6179775280898876
+        },
+        "config": {
+          "form_prior_weight": 8.0,
+          "feature_set": "no_attempt_share",
+          "c": 1.0,
+          "validation_log_loss": 0.6561134496349995
+        }
       },
       {
-        "c": 0.25,
-        "log_loss": 0.6826294149618264,
-        "brier_score": 0.2446149016019286
+        "season": 2022,
+        "model": {
+          "n": 1312,
+          "log_loss": 0.6529812484172727,
+          "brier": 0.23065677174423593,
+          "accuracy": 0.6196646341463414
+        },
+        "constant_home_rate": {
+          "n": 1312,
+          "log_loss": 0.6922984482603135,
+          "brier": 0.2495753110426034,
+          "accuracy": 0.5236280487804879
+        },
+        "same_games_model": {
+          "n": 1224,
+          "log_loss": 0.652565105312876,
+          "brier": 0.230499248312997,
+          "accuracy": 0.6168300653594772
+        },
+        "same_games_previous_design": {
+          "n": 1224,
+          "log_loss": 0.669750465193852,
+          "brier": 0.23848760754070733,
+          "accuracy": 0.5906862745098039
+        },
+        "playoffs": {
+          "n": 88,
+          "log_loss": 0.7062651782458134,
+          "brier": 0.2563165432016163,
+          "accuracy": 0.48863636363636365
+        },
+        "config": {
+          "form_prior_weight": 25.0,
+          "feature_set": "no_attempt_share",
+          "c": 0.05,
+          "validation_log_loss": 0.6443674466440346
+        }
       },
       {
-        "c": 0.5,
-        "log_loss": 0.6826296893320988,
-        "brier_score": 0.24461440459354072
+        "season": 2023,
+        "model": {
+          "n": 1312,
+          "log_loss": 0.6571712554786403,
+          "brier": 0.23266201480278706,
+          "accuracy": 0.6097560975609756
+        },
+        "constant_home_rate": {
+          "n": 1312,
+          "log_loss": 0.6899028099813734,
+          "brier": 0.2483793611187178,
+          "accuracy": 0.5411585365853658
+        },
+        "same_games_model": {
+          "n": 1227,
+          "log_loss": 0.6572972235051552,
+          "brier": 0.23271571119556572,
+          "accuracy": 0.6104319478402608
+        },
+        "same_games_previous_design": {
+          "n": 1227,
+          "log_loss": 0.6734412529996286,
+          "brier": 0.24017147890319124,
+          "accuracy": 0.5835370823145885
+        },
+        "playoffs": {
+          "n": 88,
+          "log_loss": 0.6636072888716097,
+          "brier": 0.23589763149157442,
+          "accuracy": 0.5681818181818182
+        },
+        "config": {
+          "form_prior_weight": 8.0,
+          "feature_set": "no_attempt_share",
+          "c": 0.05,
+          "validation_log_loss": 0.6525059519229334
+        }
       },
       {
-        "c": 1.0,
-        "log_loss": 0.6826298705159035,
-        "brier_score": 0.24461417492035226
+        "season": 2024,
+        "model": {
+          "n": 1312,
+          "log_loss": 0.6636369373360147,
+          "brier": 0.23585082575758373,
+          "accuracy": 0.5807926829268293
+        },
+        "constant_home_rate": {
+          "n": 1312,
+          "log_loss": 0.686932862335917,
+          "brier": 0.246896771924076,
+          "accuracy": 0.5625
+        },
+        "same_games_model": {
+          "n": 1225,
+          "log_loss": 0.6630570223145225,
+          "brier": 0.23559393747256505,
+          "accuracy": 0.5812244897959183
+        },
+        "same_games_previous_design": {
+          "n": 1225,
+          "log_loss": 0.6756269138904869,
+          "brier": 0.2413189663168523,
+          "accuracy": 0.563265306122449
+        },
+        "playoffs": {
+          "n": 86,
+          "log_loss": 0.6538341317458236,
+          "brier": 0.23072638454653163,
+          "accuracy": 0.6162790697674418
+        },
+        "config": {
+          "form_prior_weight": 8.0,
+          "feature_set": "no_attempt_share",
+          "c": 0.05,
+          "validation_log_loss": 0.6571712554786403
+        }
       },
       {
-        "c": 2.0,
-        "log_loss": 0.6826299725533373,
-        "brier_score": 0.24461406500059904
-      },
-      {
-        "c": 5.0,
-        "log_loss": 0.6826300375138699,
-        "brier_score": 0.24461400065759456
-      },
-      {
-        "c": 10.0,
-        "log_loss": 0.6826300597967728,
-        "brier_score": 0.2446139794810662
-      },
-      {
-        "c": 0.05,
-        "log_loss": 0.6826306464499304,
-        "brier_score": 0.24462031400298762
-      },
-      {
-        "c": 0.01,
-        "log_loss": 0.6826793063478042,
-        "brier_score": 0.2446631852535721
+        "season": 2025,
+        "model": {
+          "n": 1312,
+          "log_loss": 0.688132940023973,
+          "brier": 0.24742367918708352,
+          "accuracy": 0.541920731707317
+        },
+        "constant_home_rate": {
+          "n": 1312,
+          "log_loss": 0.6927132494669411,
+          "brier": 0.24978198830447246,
+          "accuracy": 0.5221036585365854
+        },
+        "same_games_model": {
+          "n": 1226,
+          "log_loss": 0.6894912800721581,
+          "brier": 0.24805626787343996,
+          "accuracy": 0.5399673735725938
+        },
+        "same_games_previous_design": {
+          "n": 1226,
+          "log_loss": 0.6908162072665011,
+          "brier": 0.24887943522983597,
+          "accuracy": 0.5350734094616639
+        },
+        "playoffs": {
+          "n": 82,
+          "log_loss": 0.657649162561257,
+          "brier": 0.2330484676117417,
+          "accuracy": 0.5853658536585366
+        },
+        "config": {
+          "form_prior_weight": 8.0,
+          "feature_set": "no_attempt_share",
+          "c": 0.05,
+          "validation_log_loss": 0.6636319622933479
+        }
       }
-    ]
+    ],
+    "game_gate": {
+      "legacy_mean_log_loss": 0.6744120979578654,
+      "model_mean_log_loss": 0.6609741983803024,
+      "mean_gain": 0.013437899577563028,
+      "required_gain": 0.005,
+      "seasons_worse_than_legacy": [],
+      "passed": true
+    },
+    "calibration": [
+      {
+        "mean_predicted": 0.30171197217368323,
+        "observed": 0.32926829268292684,
+        "n": 656
+      },
+      {
+        "mean_predicted": 0.3920074763508348,
+        "observed": 0.40853658536585363,
+        "n": 656
+      },
+      {
+        "mean_predicted": 0.44436436089171877,
+        "observed": 0.4725609756097561,
+        "n": 656
+      },
+      {
+        "mean_predicted": 0.4837334217905664,
+        "observed": 0.48323170731707316,
+        "n": 656
+      },
+      {
+        "mean_predicted": 0.5206577387712745,
+        "observed": 0.5213414634146342,
+        "n": 656
+      },
+      {
+        "mean_predicted": 0.555487228381949,
+        "observed": 0.5457317073170732,
+        "n": 656
+      },
+      {
+        "mean_predicted": 0.5902396993517469,
+        "observed": 0.5777439024390244,
+        "n": 656
+      },
+      {
+        "mean_predicted": 0.6290672476129123,
+        "observed": 0.6128048780487805,
+        "n": 656
+      },
+      {
+        "mean_predicted": 0.6785793817826185,
+        "observed": 0.6585365853658537,
+        "n": 656
+      },
+      {
+        "mean_predicted": 0.7571405313715803,
+        "observed": 0.7621951219512195,
+        "n": 656
+      }
+    ],
+    "playoff_games": {
+      "n": 433,
+      "log_loss": 0.6696798316189935,
+      "brier": 0.23863545273304798,
+      "accuracy": 0.5750577367205543
+    },
+    "simulation": {
+      "checkpoints": 20,
+      "selected": {
+        "strength_sd_preseason": 0.4,
+        "strength_sd_late": 0.1
+      },
+      "model_log_loss": 0.3530625725058604,
+      "points_pace_log_loss": 0.396650241169444,
+      "zero_noise_log_loss": 0.37966375697546395,
+      "by_checkpoint": {
+        "opening": {
+          "model_log_loss": 0.5569184182273379,
+          "points_pace_log_loss": 0.6930362239974301,
+          "champion_cup_rank": [
+            1,
+            10,
+            9,
+            3,
+            5
+          ],
+          "champion_cup_odds": [
+            0.1695,
+            0.0425,
+            0.047,
+            0.1065,
+            0.0675
+          ]
+        },
+        "12-01": {
+          "model_log_loss": 0.3783595228482685,
+          "points_pace_log_loss": 0.4125726673959395,
+          "champion_cup_rank": [
+            1,
+            4,
+            5,
+            2,
+            2
+          ],
+          "champion_cup_odds": [
+            0.1485,
+            0.08,
+            0.0865,
+            0.1035,
+            0.1735
+          ]
+        },
+        "02-01": {
+          "model_log_loss": 0.29201866894995526,
+          "points_pace_log_loss": 0.3008893389932498,
+          "champion_cup_rank": [
+            1,
+            10,
+            3,
+            3,
+            2
+          ],
+          "champion_cup_odds": [
+            0.2105,
+            0.0335,
+            0.1195,
+            0.1145,
+            0.1625
+          ]
+        },
+        "03-15": {
+          "model_log_loss": 0.1849536799978797,
+          "points_pace_log_loss": 0.18010273429115664,
+          "champion_cup_rank": [
+            1,
+            5,
+            2,
+            2,
+            2
+          ],
+          "champion_cup_odds": [
+            0.215,
+            0.047,
+            0.19,
+            0.168,
+            0.2405
+          ]
+        }
+      }
+    },
+    "series": {
+      "series": 75,
+      "model": {
+        "n": 75,
+        "log_loss": 0.5959300924182354,
+        "brier": 0.20544510041778802,
+        "accuracy": 0.6666666666666666
+      },
+      "home_ice_only": {
+        "n": 75,
+        "log_loss": 0.6884447498732617,
+        "brier": 0.24764915150441577,
+        "accuracy": 0.6133333333333333
+      }
+    },
+    "goal_markets": {
+      "seasons": [
+        {
+          "season": 2021,
+          "games": 1312,
+          "model": {
+            "one_x_two_log_loss": 1.017603353493555,
+            "home_minus_1_5_brier": 0.20781543245723857,
+            "away_minus_1_5_brier": 0.18664479632232553,
+            "over_5_5_brier": 0.24645035940907342
+          },
+          "league_rate": {
+            "one_x_two_log_loss": 1.0653360879772518,
+            "home_minus_1_5_brier": 0.22136890958900168,
+            "away_minus_1_5_brier": 0.20011184748253594,
+            "over_5_5_brier": 0.24584241167306886
+          },
+          "moneyline_with_fixed_draw_rate_log_loss": 1.0183546121283886,
+          "predicted_draw_rate": 0.21786154106610364,
+          "observed_draw_rate": 0.21951219512195122,
+          "shape": {
+            "rate_scale": 0.9693,
+            "tie_inflation": 0.4328,
+            "lead1_transfer": 0.2946,
+            "lead2_transfer": 0.4464,
+            "overtime_intercept": -0.2043,
+            "overtime_logit_coef": 0.4362
+          }
+        },
+        {
+          "season": 2022,
+          "games": 1312,
+          "model": {
+            "one_x_two_log_loss": 1.0286847021153454,
+            "home_minus_1_5_brier": 0.20281765198256207,
+            "away_minus_1_5_brier": 0.1872143335605039,
+            "over_5_5_brier": 0.24087081576244182
+          },
+          "league_rate": {
+            "one_x_two_log_loss": 1.0734019369930217,
+            "home_minus_1_5_brier": 0.21672914123190865,
+            "away_minus_1_5_brier": 0.20089325922824022,
+            "over_5_5_brier": 0.24302826183293916
+          },
+          "moneyline_with_fixed_draw_rate_log_loss": 1.0334791825975669,
+          "predicted_draw_rate": 0.21102648487975412,
+          "observed_draw_rate": 0.2301829268292683,
+          "shape": {
+            "rate_scale": 0.9833,
+            "tie_inflation": 0.4547,
+            "lead1_transfer": 0.3083,
+            "lead2_transfer": 0.4678,
+            "overtime_intercept": -0.1376,
+            "overtime_logit_coef": 0.4723
+          }
+        },
+        {
+          "season": 2023,
+          "games": 1312,
+          "model": {
+            "one_x_two_log_loss": 1.0230149214008029,
+            "home_minus_1_5_brier": 0.2131833974586369,
+            "away_minus_1_5_brier": 0.19222523230040794,
+            "over_5_5_brier": 0.2447163393101415
+          },
+          "league_rate": {
+            "one_x_two_log_loss": 1.0583058114567114,
+            "home_minus_1_5_brier": 0.22374030966124128,
+            "away_minus_1_5_brier": 0.2025416657214717,
+            "over_5_5_brier": 0.2448634509831792
+          },
+          "moneyline_with_fixed_draw_rate_log_loss": 1.0256668078823448,
+          "predicted_draw_rate": 0.21599671748372368,
+          "observed_draw_rate": 0.2073170731707317,
+          "shape": {
+            "rate_scale": 0.9827,
+            "tie_inflation": 0.4877,
+            "lead1_transfer": 0.3119,
+            "lead2_transfer": 0.4773,
+            "overtime_intercept": -0.087,
+            "overtime_logit_coef": 0.4123
+          }
+        },
+        {
+          "season": 2024,
+          "games": 1312,
+          "model": {
+            "one_x_two_log_loss": 1.0319136821162849,
+            "home_minus_1_5_brier": 0.2241828236127547,
+            "away_minus_1_5_brier": 0.18931551607520938,
+            "over_5_5_brier": 0.24855545395851578
+          },
+          "league_rate": {
+            "one_x_two_log_loss": 1.0533997026956798,
+            "home_minus_1_5_brier": 0.2291626343441713,
+            "away_minus_1_5_brier": 0.19417331511981703,
+            "over_5_5_brier": 0.24917071484989708
+          },
+          "moneyline_with_fixed_draw_rate_log_loss": 1.0325229320958107,
+          "predicted_draw_rate": 0.2203681764407913,
+          "observed_draw_rate": 0.20655487804878048,
+          "shape": {
+            "rate_scale": 0.9814,
+            "tie_inflation": 0.4781,
+            "lead1_transfer": 0.3169,
+            "lead2_transfer": 0.4932,
+            "overtime_intercept": -0.0497,
+            "overtime_logit_coef": 0.4105
+          }
+        },
+        {
+          "season": 2025,
+          "games": 1312,
+          "model": {
+            "one_x_two_log_loss": 1.07228258698486,
+            "home_minus_1_5_brier": 0.20627812040559032,
+            "away_minus_1_5_brier": 0.19376610226547497,
+            "over_5_5_brier": 0.24540975643937
+          },
+          "league_rate": {
+            "one_x_two_log_loss": 1.0829146890083736,
+            "home_minus_1_5_brier": 0.21146680216802174,
+            "away_minus_1_5_brier": 0.19560665718844483,
+            "over_5_5_brier": 0.24489334899107318
+          },
+          "moneyline_with_fixed_draw_rate_log_loss": 1.075204224720859,
+          "predicted_draw_rate": 0.22155785885716847,
+          "observed_draw_rate": 0.24847560975609756,
+          "shape": {
+            "rate_scale": 0.9754,
+            "tie_inflation": 0.4534,
+            "lead1_transfer": 0.3207,
+            "lead2_transfer": 0.4725,
+            "overtime_intercept": -0.0421,
+            "overtime_logit_coef": 0.4363
+          }
+        }
+      ],
+      "playoffs": {
+        "games": 433,
+        "one_x_two_log_loss": 1.0513054653195966,
+        "predicted_draw_rate": 0.22346852888706373,
+        "observed_draw_rate": 0.22401847575057737
+      },
+      "gate": {
+        "one_x_two_beats_league_rate_every_season": true,
+        "home_minus_1_5_beats_league_rate_every_season": true,
+        "away_minus_1_5_beats_league_rate_every_season": true,
+        "over_5_5_beats_league_rate_every_season": false,
+        "passed": true
+      }
+    }
   }
 }

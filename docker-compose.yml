@@ -8,15 +8,19 @@ services:
     # the deploy layer without rebuilding the image.
     environment:
       PUCKPEAK_CACHE_WARMER_ENABLED: "1"
+      PUCKPEAK_DATA_DIR: "/app/.data"
     expose:
       - "8501"
     volumes:
       - nhl_cache:/app/.cache/nhl_api
+      # Prediction ledger: the public track record. Losing this volume loses the record.
+      - puckpeak_data:/app/.data
     networks:
       - web
 
 volumes:
   nhl_cache:
+  puckpeak_data:
 
 networks:
   web:

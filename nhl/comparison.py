@@ -27,15 +27,19 @@ from nhl.data_loaders import (
     get_player_roster_info,
     get_team_season_summary,
     get_team_all_time_stats,
-    load_win_prob_weights,
 )
 from nhl.dialog import (
     show_matchup_history,
     show_player_identity_details,
     show_team_identity_details,
 )
-from nhl.schedule import get_upcoming_games
-from nhl.stanley_cup import build_stanley_cup_board
+from nhl.schedule import get_season_projection, get_track_record, get_upcoming_games
+from nhl.stanley_cup import (
+    BOARD_MODE_CHAMPION,
+    BOARD_MODE_ODDS,
+    BOARD_MODE_PRESEASON,
+    build_stanley_cup_board,
+)
 from nhl.ui_state import (
     dialog_slot_available,
     mark_dialog_opened_this_run,
@@ -1310,31 +1314,44 @@ def _build_live_game_card_html(game: dict) -> str:
         away_short_esc = escape(away_short_name)
         home_short_esc = escape(home_short_name)
         model_label = escape(str(probability.get("model_label", "") or "").strip())
-        goalie_label = escape(str(probability.get("goalie_label", "") or "").strip())
-        playoff_note = ""
-        if int(game.get("game_type", 0) or 0) == 3:
-            playoff_note = "<div class='live-games-probability__meta live-games-probability__meta--playoff'>Regular-season calibrated model.</div>"
-        # Until both teams have enough games logged this season the estimate is built
-        # from the prior season. Say so rather than passing it off as current form.
-        season_note = ""
-        if probability.get("is_prior_season"):
-            _prior_year = probability.get("season_used")
-            try:
-                _prior_label = f"{int(_prior_year)}-{str(int(_prior_year) + 1)[2:]}"
-            except Exception:
-                _prior_label = "prior"
-            season_note = (
+        meta_lines: list[str] = []
+        if model_label:
+            meta_lines.append(f"<div class='live-games-probability__meta'>{model_label}</div>")
+        try:
+            fair_odds_away = float(probability.get("fair_odds_away") or 0.0)
+            fair_odds_home = float(probability.get("fair_odds_home") or 0.0)
+        except (TypeError, ValueError):
+            fair_odds_away = fair_odds_home = 0.0
+        if fair_odds_away > 1.0 and fair_odds_home > 1.0:
+            meta_lines.append(
                 "<div class='live-games-probability__meta'>"
-                f"Based on {escape(_prior_label)} form — too few games this season."
+                f"Fair odds: {away_short_esc} {fair_odds_away:.2f} · {home_short_esc} {fair_odds_home:.2f}"
+                "</div>"
+            )
+        markets_markup = _build_game_markets_markup(probability.get("markets"), away_short_name, home_short_name, home_leading or is_tied)
+        if markets_markup:
+            meta_lines.append(markets_markup)
+        tired_teams = [
+            short_name
+            for short_name, flag in ((away_short_name, probability.get("away_back_to_back")), (home_short_name, probability.get("home_back_to_back")))
+            if flag
+        ]
+        if tired_teams:
+            meta_lines.append(
+                f"<div class='live-games-probability__meta'>Back-to-back: {escape(' & '.join(tired_teams))}</div>"
+            )
+        # Early in a season a team's rating is still mostly last season's. Say so rather
+        # than passing it off as current form.
+        if probability.get("early_season"):
+            meta_lines.append(
+                "<div class='live-games-probability__meta live-games-probability__meta--note'>"
+                "Early season: ratings still lean on last season."
                 "</div>"
             )
         meta_block = (
             "<div class='lgc-meta-popover'>"
             "<div class='lgc-meta'>"
-            f"<div class='live-games-probability__meta'>{model_label}</div>"
-            f"<div class='live-games-probability__meta'>{goalie_label}</div>"
-            f"{season_note}"
-            f"{playoff_note}"
+            f"{''.join(meta_lines)}"
             "</div>"
             "</div>"
         )
@@ -1360,9 +1377,15 @@ def _build_live_game_card_html(game: dict) -> str:
         )
     else:
         meta_block = ""
+        # Preseason lineups are mostly prospects, so exhibitions never get a prediction.
+        muted_text = (
+            "Exhibition — no prediction."
+            if int(game.get("game_type", 0) or 0) == 1
+            else "Estimate unavailable right now."
+        )
         prob_section = (
             "<div class='lgc-prob-section live-games-probability--muted'>"
-            "Estimate available once both teams have played a few games."
+            f"{muted_text}"
             "</div>"
         )
         card_style = ""
@@ -1387,6 +1410,63 @@ def _build_live_game_card_html(game: dict) -> str:
         f"{meta_block}"
         "</div>"
         f"{prob_section}"
+        "</div>"
+    )
+
+
+def _build_market_cell(label: str, probability: float) -> str:
+    """Return one market outcome: label, probability and fair decimal odds."""
+    percent = f"{probability * 100.0:.0f}%"
+    odds = f"{1.0 / probability:.2f}" if probability >= 0.01 else "—"
+    return (
+        "<div class='lgc-market'>"
+        f"<span class='lgc-market__label'>{escape(label)}</span>"
+        f"<span class='lgc-market__pct'>{percent}</span>"
+        f"<span class='lgc-market__odds'>{odds}</span>"
+        "</div>"
+    )
+
+
+def _build_game_markets_markup(markets: object, away_name: str, home_name: str, home_is_favorite: bool) -> str:
+    """Build the 60-minute result and puck-line block for a prediction card popover.
+
+    Outcomes run away, draw, home to match the card's left-to-right layout. The puck
+    line is quoted the usual way: the moneyline favourite at -1.5, the underdog at +1.5.
+
+    Args:
+        markets: ``markets`` from ``get_game_win_probabilities``, or ``None``.
+        away_name: Away team short name.
+        home_name: Home team short name.
+        home_is_favorite: Whether the home side is the moneyline favourite.
+
+    Returns:
+        HTML, or an empty string when there are no markets.
+    """
+    if not isinstance(markets, dict):
+        return ""
+    regulation = markets.get("regulation") or {}
+    puck_line = markets.get("puck_line") or {}
+    try:
+        away_win = float(regulation["away"])
+        draw = float(regulation["draw"])
+        home_win = float(regulation["home"])
+        favorite_minus = float(puck_line["home_minus_1_5"] if home_is_favorite else puck_line["away_minus_1_5"])
+    except (KeyError, TypeError, ValueError):
+        return ""
+    favorite, underdog = (home_name, away_name) if home_is_favorite else (away_name, home_name)
+    return (
+        "<div class='lgc-markets'>"
+        "<div class='lgc-markets__title'>60-minute result</div>"
+        "<div class='lgc-markets__row lgc-markets__row--three'>"
+        f"{_build_market_cell(away_name, away_win)}"
+        f"{_build_market_cell('Draw', draw)}"
+        f"{_build_market_cell(home_name, home_win)}"
+        "</div>"
+        "<div class='lgc-markets__title'>Puck line</div>"
+        "<div class='lgc-markets__row'>"
+        f"{_build_market_cell(f'{favorite} −1.5', favorite_minus)}"
+        f"{_build_market_cell(f'{underdog} +1.5', 1.0 - favorite_minus)}"
+        "</div>"
         "</div>"
     )
 
@@ -1473,8 +1553,81 @@ def _get_team_short_name(team_abbr: str, fallback_name: str) -> str:
     return _TEAM_SHORT_NAMES.get(team_abbr, ACTIVE_TEAMS.get(team_abbr, fallback_name))
 
 
+def _season_span_label(season_year: object) -> str:
+    """Format a season start year as ``2026-27``, or an empty string."""
+    try:
+        year = int(season_year)
+    except (TypeError, ValueError):
+        return ""
+    return f"{year}-{str(year + 1)[2:]}"
+
+
+def _build_track_record_markup(record: object) -> str:
+    """Build the predictions panel's track-record block.
+
+    The live line comes only from the prediction ledger (published before puck drop,
+    graded after). It shows nothing until ``min_games`` games are graded, because a
+    handful of results says nothing about accuracy. The backtest line is labelled
+    separately and never mixed into the live numbers.
+
+    Args:
+        record: ``schedule.get_track_record`` output.
+
+    Returns:
+        HTML, or an empty string when there is nothing to report.
+    """
+    if not isinstance(record, dict):
+        return ""
+    live = record.get("live") or {}
+    backtest = record.get("backtest")
+    minimum = int(record.get("min_games", 20) or 20)
+    season_label = escape(_season_span_label(record.get("season_year")))
+    lines: list[str] = []
+
+    graded = int(live.get("games", 0) or 0)
+    logged = int(live.get("logged", 0) or 0)
+    if graded >= minimum:
+        lines.append(
+            "<div class='track-record__line'>"
+            f"<strong>{season_label} live:</strong> {graded} games · {float(live['accuracy']) * 100:.0f}% winners picked · "
+            f"log loss {float(live['log_loss']):.3f} (coin flip {float(live['coin_flip_log_loss']):.3f})"
+            "</div>"
+        )
+        market_games = int(live.get("market_games", 0) or 0)
+        if market_games >= minimum:
+            lines.append(
+                "<div class='track-record__line'>"
+                f"Betting market, same {market_games} games: log loss {float(live['market_log_loss']):.3f} "
+                f"vs model {float(live['model_log_loss_on_market_games']):.3f}"
+                "</div>"
+            )
+    elif season_label:
+        progress = f"{logged} predictions logged, {graded} graded" if logged else "starts with the first regular-season games"
+        lines.append(
+            "<div class='track-record__line'>"
+            f"<strong>{season_label} live:</strong> {escape(progress)}; results appear after {minimum} graded games."
+            "</div>"
+        )
+
+    if isinstance(backtest, dict) and backtest.get("games"):
+        span = f"{_season_span_label(backtest.get('first_season'))} to {_season_span_label(backtest.get('last_season'))}"
+        lines.append(
+            "<div class='track-record__line track-record__line--muted'>"
+            f"Backtest {escape(span)}: {int(backtest['games']):,} games · {float(backtest['accuracy']) * 100:.0f}% winners · "
+            f"log loss {float(backtest['log_loss']):.3f}"
+            "</div>"
+        )
+
+    if not lines:
+        return ""
+    return "<div class='track-record'><div class='track-record__title'>Track record</div>" + "".join(lines) + "</div>"
+
+
 def _render_live_games_tab(share_params: dict | None = None) -> None:
     """Render the shared right-rail predictions cards for upcoming games."""
+    track_record_markup = _build_track_record_markup(get_track_record())
+    if track_record_markup:
+        st.markdown(track_record_markup, unsafe_allow_html=True)
     upcoming_games = get_upcoming_games(limit=_PREDICTIONS_PANEL_MATCH_LIMIT)
     if not upcoming_games:
         st.info("No upcoming NHL games found right now.")
@@ -1884,33 +2037,84 @@ def _render_overview_teams(
 
 @st.cache_data(ttl=3600)
 def get_stanley_cup_board() -> dict:
-    """Return one cached live current-standings board with a Cup favorite."""
+    """Return one cached standings board with simulated Stanley Cup odds."""
     return build_stanley_cup_board(
         standings_df=get_current_nhl_standings(),
-        artifact=load_win_prob_weights(),
-        goalie_proxy_by_team=None,
+        projection=get_season_projection(),
     )
+
+
+def _format_odds_pct(probability: float | None) -> str:
+    """Format a simulated probability for the board's odds columns."""
+    if probability is None:
+        return "—"
+    value = float(probability)
+    if value <= 0.0:
+        return "—"
+    if value >= 1.0:
+        return "100%"
+    if value < 0.001:
+        return "<0.1%"
+    if value < 0.10:
+        return f"{value * 100.0:.1f}%"
+    if value > 0.995:
+        return ">99%"
+    return f"{value * 100.0:.0f}%"
 
 
 def _build_current_standings_board_markup(board: dict) -> str:
     """Return the league-wide standings board markup."""
+    mode = str(board.get("mode", "") or "")
+    show_odds = mode in (BOARD_MODE_ODDS, BOARD_MODE_PRESEASON)
+    show_record = mode != BOARD_MODE_PRESEASON
     generated_at_label = escape(str(board.get("generated_at_label", "") or "").strip())
     favorite_team = board.get("favorite_team", {}) if isinstance(board, dict) else {}
     favorite_name = escape(str(favorite_team.get("team_name", "") or "").strip())
-    favorite_summary = escape(str(favorite_team.get("summary_text", "") or "").strip())
-    favorite_rank = favorite_team.get("rank")
+    champion_team = board.get("champion_team", {}) if isinstance(board, dict) else {}
+    champion_name = escape(str(champion_team.get("team_name", "") or "").strip())
+    season_label = escape(str(board.get("season_label", "") or "").strip())
+    summary_text = escape(str(board.get("summary_text", "") or "").strip())
 
     meta_bits: list[str] = []
     if generated_at_label:
         meta_bits.append(f"<span>{generated_at_label}</span>")
-    if favorite_name:
-        label_suffix = f" (model rank #{int(favorite_rank)})" if favorite_rank else ""
+    if favorite_name and show_odds:
         meta_bits.append(
             "<span>"
             "<span class='stanley-cup-favorite-button-anchor'></span>"
-            f"Cup pick: <strong>{favorite_name}</strong>{escape(label_suffix)}"
+            f"<strong>{favorite_name}</strong> · {escape(_format_odds_pct(favorite_team.get('cup_pct')))} to win the Cup"
             "</span>"
         )
+    elif champion_name and mode == BOARD_MODE_CHAMPION:
+        meta_bits.append(
+            "<span>"
+            "<span class='stanley-cup-champion-anchor'></span>"
+            f"<strong>{champion_name}</strong> · won the {season_label} Cup"
+            "</span>"
+        )
+
+    window_modifier = ""
+    if mode == BOARD_MODE_ODDS:
+        window_modifier = " stanley-cup-division-window--odds"
+    elif mode == BOARD_MODE_PRESEASON:
+        window_modifier = " stanley-cup-division-window--preseason"
+
+    head_cells: list[str] = ["<div class='stanley-cup-table-head__team'>Team</div>"]
+    if show_record:
+        head_cells.extend([
+            "<div>GP</div>",
+            "<div class='stanley-cup-col--record'>W</div>",
+            "<div class='stanley-cup-col--record'>L</div>",
+            "<div class='stanley-cup-col--record'>OTL</div>",
+            "<div>Pts</div>",
+        ])
+    else:
+        head_cells.append("<div title='Projected points after the full season'>Proj</div>")
+    if show_odds:
+        head_cells.extend([
+            "<div title='Chance to make the playoffs'>Playoffs</div>",
+            "<div title='Chance to win the Stanley Cup'>Cup</div>",
+        ])
 
     division_markup: list[str] = []
     for division in board.get("divisions", []):
@@ -1930,7 +2134,13 @@ def _build_current_standings_board_markup(board: dict) -> str:
             favorite_style = ""
             favorite_badge = ""
             row_classes = "stanley-cup-row"
-            if team.get("is_favorite"):
+            # Icon-only badge: a text badge truncated the favourite's own team name.
+            highlight_label = ""
+            if team.get("is_favorite") and show_odds:
+                highlight_label = "Cup favorite"
+            elif team.get("is_champion") and mode == BOARD_MODE_CHAMPION:
+                highlight_label = "Stanley Cup champion"
+            if highlight_label:
                 row_classes = f"{row_classes} stanley-cup-row--favorite"
                 favorite_style = escape(
                     (
@@ -1940,7 +2150,29 @@ def _build_current_standings_board_markup(board: dict) -> str:
                     ),
                     quote=True,
                 )
-                favorite_badge = "<span class='stanley-cup-row-badge'>Cup pick</span>"
+                favorite_badge = (
+                    "<span class='stanley-cup-row-badge stanley-cup-row-badge--icon' "
+                    f"title='{highlight_label}' aria-label='{highlight_label}'>★</span>"
+                )
+
+            value_cells: list[str] = []
+            if show_record:
+                value_cells.extend([
+                    f"<div class='stanley-cup-row-value'>{int(team.get('games_played', 0) or 0)}</div>",
+                    f"<div class='stanley-cup-row-value stanley-cup-col--record'>{int(team.get('wins', 0) or 0)}</div>",
+                    f"<div class='stanley-cup-row-value stanley-cup-col--record'>{int(team.get('losses', 0) or 0)}</div>",
+                    f"<div class='stanley-cup-row-value stanley-cup-col--record'>{int(team.get('ot_losses', 0) or 0)}</div>",
+                    f"<div class='stanley-cup-row-value stanley-cup-row-value--pts'>{int(team.get('points', 0) or 0)}</div>",
+                ])
+            else:
+                projected_points = team.get("projected_points")
+                projected_text = f"{float(projected_points):.0f}" if projected_points is not None else "—"
+                value_cells.append(f"<div class='stanley-cup-row-value stanley-cup-row-value--pts'>{projected_text}</div>")
+            if show_odds:
+                value_cells.extend([
+                    f"<div class='stanley-cup-row-value stanley-cup-row-value--odds'>{escape(_format_odds_pct(team.get('playoff_pct')))}</div>",
+                    f"<div class='stanley-cup-row-value stanley-cup-row-value--cup'>{escape(_format_odds_pct(team.get('cup_pct')))}</div>",
+                ])
 
             row_markup.append(
                 "<div class='comparison-card-shell comparison-card-shell--clickable "
@@ -1956,17 +2188,13 @@ def _build_current_standings_board_markup(board: dict) -> str:
                 f"<span class='stanley-cup-row-team-name'>{team_name}</span>"
                 f"{favorite_badge}"
                 "</div>"
-                f"<div class='stanley-cup-row-value'>{int(team.get('games_played', 0) or 0)}</div>"
-                f"<div class='stanley-cup-row-value'>{int(team.get('wins', 0) or 0)}</div>"
-                f"<div class='stanley-cup-row-value'>{int(team.get('losses', 0) or 0)}</div>"
-                f"<div class='stanley-cup-row-value'>{int(team.get('ot_losses', 0) or 0)}</div>"
-                f"<div class='stanley-cup-row-value stanley-cup-row-value--pts'>{int(team.get('points', 0) or 0)}</div>"
+                f"{''.join(value_cells)}"
                 "</div>"
                 "</div>"
             )
 
         division_markup.append(
-            "<section class='stanley-cup-division-window' "
+            f"<section class='stanley-cup-division-window{window_modifier}' "
             f"style='--division-accent:{escape(accent, quote=True)};"
             f"--division-accent-soft:{escape(accent_soft, quote=True)};"
             f"--division-accent-glow:{escape(accent_glow, quote=True)};'>"
@@ -1975,20 +2203,27 @@ def _build_current_standings_board_markup(board: dict) -> str:
             f"<div class='stanley-cup-division-heading'>{safe_division_name} Division</div>"
             "</div>"
             "<div class='stanley-cup-table-head'>"
-            "<div class='stanley-cup-table-head__team'>Team</div>"
-            "<div>GP</div>"
-            "<div>W</div>"
-            "<div>L</div>"
-            "<div>OTL</div>"
-            "<div>Pts</div>"
+            f"{''.join(head_cells)}"
             "</div>"
             f"{''.join(row_markup)}"
             "</section>"
         )
 
+    contender_markup = ""
+    contenders = board.get("contenders", []) if show_odds else []
+    if contenders:
+        contender_bits = [
+            "<span class='stanley-cup-contender'>"
+            f"{escape(str(contender.get('team_common_name') or contender.get('team_name') or contender.get('team_abbr') or ''))} "
+            f"<strong>{escape(_format_odds_pct(contender.get('cup_pct')))}</strong>"
+            "</span>"
+            for contender in contenders
+        ]
+        contender_markup = f"<div class='stanley-cup-contenders'>Most likely champions: {''.join(contender_bits)}</div>"
+
     summary_markup = (
-        f"<div class='stanley-cup-board-summary'>{favorite_summary}</div>"
-        if favorite_summary
+        f"<div class='stanley-cup-board-summary'>{summary_text}{contender_markup}</div>"
+        if summary_text
         else ""
     )
 

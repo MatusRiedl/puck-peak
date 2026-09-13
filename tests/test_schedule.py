@@ -1,9 +1,14 @@
+import math
+import os
+import shutil
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 from nhl import schedule
-from nhl.win_prob import WIN_PROB_FEATURE_ORDER
+from nhl.ledger import load_ledger
+from nhl.win_prob import validate_model_artifact
 
 
 class ScheduleTests(unittest.TestCase):
@@ -25,7 +30,9 @@ class ScheduleTests(unittest.TestCase):
             schedule.get_game_details,
             schedule.get_matchup_history,
             schedule.get_game_win_probabilities,
-            getattr(schedule, "get_team_goalie_proxy_save_percentage", None),
+            schedule.get_current_team_ratings,
+            schedule.get_season_projection,
+            getattr(schedule, "_get_schedule_back_to_back_flags", None),
             getattr(schedule, "_get_cached_club_stats", None),
         ):
             if hasattr(cached_func, "clear"):
@@ -438,92 +445,195 @@ class ScheduleTests(unittest.TestCase):
             {10: "Home Star", 20: "Home Starter", 30: "Away Star", 40: "Away Ace"},
         )
 
+    @patch("nhl.schedule._get_schedule_back_to_back_flags")
+    @patch("nhl.schedule.get_current_team_ratings")
     @patch("nhl.schedule.load_win_prob_weights")
-    @patch("nhl.schedule._get_cached_club_stats")
-    @patch("nhl.schedule.get_team_season_game_log")
-    def test_get_game_win_probabilities_blends_team_form_home_ice_and_goalie_proxy(
+    def test_get_game_win_probabilities_scores_the_stronger_home_team_with_fair_odds(
         self,
-        mock_game_log,
-        mock_club_stats,
         mock_load_weights,
+        mock_ratings,
+        mock_flags,
     ):
-        """Lean toward the stronger home team without pretending certainty."""
-        mock_load_weights.return_value = {
-            "model_version": 1,
-            "feature_order": WIN_PROB_FEATURE_ORDER,
-            "coefficients": [1.2, 0.8, 0.6, 0.5, 0.05],
-            "intercept": 0.1,
-            "scaler_mean": [0.0] * len(WIN_PROB_FEATURE_ORDER),
-            "scaler_scale": [1.0] * len(WIN_PROB_FEATURE_ORDER),
-            "selected_c": 1.0,
-            "min_games": 5,
+        """Lean toward the stronger home team and report matching fair odds."""
+        mock_load_weights.return_value = validate_model_artifact(
+            {
+                "model_version": 2,
+                "feature_order": ["elo_diff", "away_back_to_back"],
+                "coefficients": [0.5, 0.1],
+                "intercept": 0.15,
+                "scaler_mean": [0.0, 0.0],
+                "scaler_scale": [50.0, 1.0],
+            }
+        )
+        mock_ratings.return_value = {
+            "season_year": 2026,
+            "teams": {
+                "DAL": {"elo": 1580.0, "goal_diff_shrunk": 0.3, "sat_share_shrunk": 0.53, "sog_share_shrunk": 0.52, "games_played": 30},
+                "EDM": {"elo": 1520.0, "goal_diff_shrunk": 0.1, "sat_share_shrunk": 0.51, "sog_share_shrunk": 0.5, "games_played": 4},
+            },
         }
-        mock_game_log.side_effect = [
-            schedule.pd.DataFrame(
-                {
-                    "GameType": ["Regular"] * 10,
-                    "GameDate": [f"2026-01-{day:02d}" for day in range(1, 11)],
-                    "GameId": list(range(10)),
-                    "GP": [1] * 10,
-                    "Points": [2, 2, 2, 0, 2, 0, 2, 2, 0, 0],
-                    "Goals": [4, 3, 5, 1, 4, 2, 3, 4, 2, 1],
-                    "GoalsAgainst": [2, 2, 3, 4, 2, 4, 2, 1, 4, 3],
-                    "PP%": [24, 21, 26, 18, 25, 20, 23, 27, 17, 19],
-                }
-            ),
-            schedule.pd.DataFrame(
-                {
-                    "GameType": ["Regular"] * 10,
-                    "GameDate": [f"2026-01-{day:02d}" for day in range(1, 11)],
-                    "GameId": list(range(20, 30)),
-                    "GP": [1] * 10,
-                    "Points": [2, 2, 0, 2, 2, 2, 2, 0, 2, 2],
-                    "Goals": [4, 5, 2, 3, 4, 4, 5, 2, 4, 3],
-                    "GoalsAgainst": [2, 1, 4, 2, 2, 1, 2, 3, 1, 2],
-                    "PP%": [23, 25, 19, 24, 22, 24, 26, 18, 25, 23],
-                }
-            ),
-        ]
-        mock_club_stats.side_effect = [
-            {"goalies": [{"playerId": 1, "name": "Away Goalie", "gamesPlayed": 38, "wins": 21, "savePercentage": 0.907}]},
-            {"goalies": [{"playerId": 2, "name": "Home Goalie", "gamesPlayed": 42, "wins": 28, "savePercentage": 0.918}]},
-        ]
+        mock_flags.return_value = {2026020123: (False, True)}
 
-        probability = schedule.get_game_win_probabilities("EDM", "DAL")
+        probability = schedule.get_game_win_probabilities("EDM", "DAL", 2026020123, 2)
 
         self.assertEqual(probability["away_pct"] + probability["home_pct"], 100)
         self.assertGreater(probability["home_pct"], probability["away_pct"])
-        self.assertIn("Base model:", probability["model_label"])
-        self.assertIn("Goalie proxy", probability["goalie_label"])
+        self.assertAlmostEqual(probability["fair_odds_home"], round(1.0 / probability["home_win_prob"], 2))
+        self.assertTrue(probability["away_back_to_back"])
+        self.assertTrue(probability["early_season"])
+        self.assertIn("Model:", probability["model_label"])
+        self.assertIsNone(probability["markets"])
+        mock_ratings.assert_called_once_with(2026)
+
+    @patch("nhl.schedule._get_schedule_back_to_back_flags", return_value={})
+    @patch("nhl.schedule.get_current_team_ratings")
+    @patch("nhl.schedule.load_win_prob_weights")
+    def test_get_game_win_probabilities_prices_markets_consistent_with_the_moneyline(
+        self,
+        mock_load_weights,
+        mock_ratings,
+        _mock_flags,
+    ):
+        """With a goal model the card gets a 60-minute result and puck line that agree with the win probability."""
+        mock_load_weights.return_value = validate_model_artifact(
+            {
+                "model_version": 2,
+                "feature_order": ["elo_diff"],
+                "coefficients": [0.5],
+                "intercept": 0.15,
+                "scaler_mean": [0.0],
+                "scaler_scale": [50.0],
+                "goal_model": {"rate_scale": 0.98, "tie_inflation": 0.48, "lead1_transfer": 0.31, "lead2_transfer": 0.46, "overtime_intercept": -0.04, "overtime_logit_coef": 0.39},
+            }
+        )
+        mock_ratings.return_value = {
+            "season_year": 2026,
+            "scoring_environment": 3.05,
+            "teams": {
+                "TOR": {"elo": 1590.0, "goal_diff_shrunk": 0.3, "sat_share_shrunk": 0.52, "sog_share_shrunk": 0.52, "games_played": 20},
+                "MTL": {"elo": 1500.0, "goal_diff_shrunk": -0.1, "sat_share_shrunk": 0.49, "sog_share_shrunk": 0.49, "games_played": 20},
+            },
+        }
+
+        probability = schedule.get_game_win_probabilities("MTL", "TOR", 2026020200, 2)
+        markets = probability["markets"]
+        regulation = markets["regulation"]
+
+        self.assertAlmostEqual(regulation["home"] + regulation["draw"] + regulation["away"], 1.0, places=9)
+        self.assertGreater(regulation["home"], regulation["away"])
+        self.assertLess(markets["puck_line"]["home_minus_1_5"], regulation["home"])
+        self.assertNotIn("totals", markets)
+        tie_break = 1 / (1 + math.exp(-(-0.04 + 0.39 * math.log(probability["home_win_prob"] / (1 - probability["home_win_prob"])))))
+        self.assertAlmostEqual(regulation["home"] + regulation["draw"] * tie_break, probability["home_win_prob"], places=5)
+
+    @patch("nhl.schedule.load_win_prob_weights")
+    def test_get_game_win_probabilities_skips_preseason_games(self, mock_load_weights):
+        """Exhibition lineups are mostly prospects, so they never get a prediction."""
+        self.assertIsNone(schedule.get_game_win_probabilities("BOS", "PHI", 2026010001, 1))
+        mock_load_weights.assert_not_called()
+
+    @patch("nhl.schedule.get_league_schedule")
+    @patch("nhl.schedule.get_current_nhl_standings")
+    @patch("nhl.schedule.get_playoff_bracket")
+    @patch("nhl.schedule.load_win_prob_weights")
+    def test_get_season_projection_reports_a_decided_cup_instead_of_simulating(
+        self,
+        mock_load_weights,
+        mock_bracket,
+        mock_standings,
+        mock_schedule,
+    ):
+        """After the Final the board names the champion and nothing is simulated."""
+        schedule.get_season_projection.clear()
+        mock_load_weights.return_value = {"model_version": 2}
+        mock_bracket.return_value = {
+            "series": [
+                {
+                    "seriesLetter": "O",
+                    "playoffRound": 4,
+                    "topSeedTeam": {"id": 12, "abbrev": "CAR"},
+                    "bottomSeedTeam": {"id": 54, "abbrev": "VGK"},
+                    "topSeedWins": 4,
+                    "bottomSeedWins": 2,
+                    "winningTeamId": 12,
+                }
+            ]
+        }
+
+        projection = schedule.get_season_projection()
+        schedule.get_season_projection.clear()
+
+        self.assertEqual(projection["state"], "champion")
+        self.assertEqual(projection["champion"], "CAR")
+        mock_standings.assert_not_called()
+        mock_schedule.assert_not_called()
+
+    @patch("nhl.schedule.get_league_game_table", return_value=schedule.pd.DataFrame())
+    @patch("nhl.schedule.get_game_win_probabilities")
+    @patch("nhl.schedule.load_win_prob_weights")
+    @patch("nhl.schedule.get_client")
+    def test_capture_prediction_ledger_logs_upcoming_games_and_market_prices(
+        self,
+        mock_get_client,
+        mock_load_weights,
+        mock_probabilities,
+        _mock_games,
+    ):
+        """Regular-season games inside the window are logged with their market prices; others are not."""
+        def _game(game_id, game_type, start):
+            return {
+                "id": game_id, "gameType": game_type, "gameState": "FUT", "startTimeUTC": start,
+                "awayTeam": {"abbrev": "FLA", "name": {"default": "Panthers"}},
+                "homeTeam": {"abbrev": "CAR", "name": {"default": "Hurricanes"}},
+                "venue": {"default": "Lenovo Center"},
+            }
+
+        scoreboard = {"gamesByDate": [{"games": [
+            _game(2026020001, 2, "2026-09-29T21:00:00Z"),
+            _game(2026010099, 1, "2026-09-29T23:00:00Z"),
+            _game(2026020060, 2, "2026-10-03T23:00:00Z"),
+        ]}]}
+        partner = {
+            "bettingPartner": {"name": "FanDuel", "country": "CAN"},
+            "games": [{"gameId": 2026020001, "gameType": 2, "startTimeUTC": "2026-09-29T21:00:00Z",
+                       "homeTeam": {"abbrev": "CAR", "odds": [{"description": "MONEY_LINE_2_WAY", "value": -125.0, "qualifier": ""}]},
+                       "awayTeam": {"abbrev": "FLA", "odds": [{"description": "MONEY_LINE_2_WAY", "value": 104.0, "qualifier": ""}]}}],
+        }
+
+        def _fake_get(url, params=None, cache_key=None, ttl=None, timeout=None):
+            if "scoreboard" in url:
+                return scoreboard
+            return partner if url.endswith("/CA/now") else {}
+
+        mock_client = MagicMock()
+        mock_client.get.side_effect = _fake_get
+        mock_get_client.return_value = mock_client
+        mock_load_weights.return_value = {"generated_at_utc": "2026-09-13T00:00:00Z"}
+        mock_probabilities.return_value = {
+            "home_win_prob": 0.66,
+            "early_season": True,
+            "markets": {"regulation": {"home": 0.54, "draw": 0.21, "away": 0.25}, "puck_line": {"home_minus_1_5": 0.43, "away_minus_1_5": 0.17}},
+        }
+
+        directory = tempfile.mkdtemp()
+        try:
+            with patch.dict(os.environ, {"PUCKPEAK_DATA_DIR": directory}):
+                summary = schedule.capture_prediction_ledger(datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc))
+                predictions, market = load_ledger()
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
+
+        self.assertEqual(summary, {"predictions": 1, "market_rows": 1, "graded": 0})
+        mock_probabilities.assert_called_once_with("FLA", "CAR", 2026020001, 2)
+        self.assertEqual(list(predictions["game_id"]), [2026020001])
+        self.assertAlmostEqual(float(predictions.iloc[0]["regulation_draw"]), 0.21)
+        self.assertEqual(predictions.iloc[0]["model_version"], "2026-09-13T00:00:00Z")
+        self.assertEqual(list(market["partner"]), ["FanDuel (CAN)"])
 
     def test_coerce_save_percentage_handles_percent_scale_payloads(self):
         """Normalize goalie save percentage whether the API sends 0.915 or 91.5."""
         self.assertAlmostEqual(schedule._coerce_save_percentage(0.915), 0.915)
         self.assertAlmostEqual(schedule._coerce_save_percentage(91.5), 0.915)
-
-    @patch("nhl.schedule._aggregate_team_save_percentage")
-    @patch("nhl.schedule._select_best_goalie")
-    def test_build_goalie_proxy_save_percentage_shrinks_toward_team_average(
-        self,
-        mock_select_best_goalie,
-        mock_team_save_pct,
-    ):
-        """Keep the goalie proxy as the starter save% blended toward team context."""
-        mock_select_best_goalie.return_value = {
-            "playerId": 1,
-            "name": "Starter",
-            "gamesPlayed": 10,
-            "savePercentage": 0.920,
-        }
-        mock_team_save_pct.return_value = 0.910
-
-        goalie_proxy = schedule._build_goalie_proxy_save_percentage(
-            [{"playerId": 1, "name": "Starter", "gamesPlayed": 10, "savePercentage": 0.920}]
-        )
-
-        self.assertAlmostEqual(goalie_proxy, 0.914)
-        mock_select_best_goalie.assert_called_once()
-        mock_team_save_pct.assert_called_once()
 
 
     def test_find_game_from_data_picks_live_over_final(self):

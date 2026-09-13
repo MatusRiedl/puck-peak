@@ -11,6 +11,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # records.nhl.com all-time table) inside their own page load.
 ENV PUCKPEAK_CACHE_WARMER_ENABLED=1
 
+# Prediction ledger (SQLite). Mount /app/.data as a volume or the public track record
+# resets on every deploy.
+ENV PUCKPEAK_DATA_DIR=/app/.data
+
 WORKDIR /app
 
 COPY requirements.txt .
@@ -18,7 +22,7 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p /app/.cache/nhl_api
+RUN mkdir -p /app/.cache/nhl_api /app/.data
 
 EXPOSE 8501
 

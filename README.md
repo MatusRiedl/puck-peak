@@ -34,9 +34,15 @@ https://nhl-age-curves.streamlit.app/
 
 * **Age Rarity in Season Snapshot:** Historical NHL regular-season age clicks now show percentile, exact rank, optional skater role split, and a compact top-5 leaderboard from the same comparison pool, so fans can see how unusual that season was at that exact age.
 
-* **Upcoming Games Predictions Panel:** A dedicated right-rail panel lists up to the next 8 upcoming games, shows venue, converts puck drop into Central European local time (CET/CEST), and keeps the cards focused on matchup context instead of a quick-add workflow. Preseason games are included and badged as such, so the panel still has content during the September gap before opening night.
+* **Upcoming Games Predictions Panel:** A dedicated right-rail panel lists up to the next 8 upcoming games, shows venue, converts puck drop into Central European local time (CET/CEST), and keeps the cards focused on matchup context instead of a quick-add workflow. Preseason games are included and badged as exhibitions, so the panel still has content during the September gap before opening night, but they are never predicted.
 
-* **Pregame Win Probability:** The right-rail predictions panel also shows a pregame away/home win estimate for each upcoming matchup. The base probability comes from an offline-trained logistic regression on the last 5 completed NHL regular seasons, then a capped goalie Save% proxy is layered on top at runtime. Early in a season, before both teams have enough games logged, the estimate falls back to the previous season and the card says so.
+* **Pregame Win Probability:** Each regular-season and playoff card shows an away/home win estimate plus fair decimal odds. The model is a logistic regression over a margin-of-victory Elo rating, shrunk season-to-date goal differential and shot shares (5v5 attempts and shots on goal), and back-to-back flags, trained offline with `train_win_prob.py`. The trainer runs a rolling-origin backtest and only writes weights that beat the previous design in every test season (mean log loss 0.6744 -> 0.6610 across 2021-22 to 2025-26). Opening-night games are scored from last season's regressed ratings, and the card flags the early-season estimate.
+
+* **60-Minute Result and Puck Line:** Each card's details also price the regulation-time result (away / draw / home) and the puck line (favorite −1.5 / underdog +1.5), with fair decimal odds. All markets come from one hockey-corrected score distribution: extra regulation ties, and late empty-net goals that widen margins. That distribution is solved to agree with the win probability, so the numbers never contradict each other. Backtested, every season from 2021-22 to 2025-26 beats the league-rate baselines. Over/under totals are deliberately not shown: they did not beat the league's plain over-rate.
+
+* **Public Track Record:** Every prediction is logged before puck drop and graded after the final horn. It is stored in a prediction ledger that cannot be edited once a game starts. The predictions panel shows this season's live record (winners picked, log loss) once 20 games are graded, plus the betting market's log loss on the same games, next to the clearly labelled backtest. Market prices come from the NHL API's free betting-partner feeds and are used only for that comparison; no bookmaker names, odds or links are shown.
+
+* **Stanley Cup Odds:** The Current Standings board simulates the rest of the season 10,000 times with the same model, seeds the playoffs with the division / wild-card format, resolves every best-of-7 exactly, and shows each team's playoff and Cup chances. It switches to the live bracket once the playoffs start, to a preseason projection before opening night, and to the actual champion once the Final is decided.
 
 * **Matchup History Modal:** Click any prediction card to open a `Matchup History` modal with the last 10 meetings between those two teams, rendered as stacked season-snapshot style matchup cards plus a plain-text win summary so you can see who has taken more of the recent head-to-head without counting manually.
 
@@ -52,7 +58,7 @@ https://nhl-age-curves.streamlit.app/
 
 ## Tech Stack
 * **Frontend/Framework:** Streamlit
-* **Data & ML:** Pandas, PyArrow, custom hybrid KNN implementation, offline scikit-learn logistic regression for pregame win probability
+* **Data & ML:** Pandas, PyArrow, custom hybrid KNN implementation, offline scikit-learn logistic regression over Elo / shot-share team ratings for pregame win probability, and a numpy Monte Carlo season simulator for Cup odds
 * **Dependencies:** `requirements.txt` is fully pinned. `plotly` must stay on 6.x — Streamlit renders charts with its own bundled plotly.js (3.3.1 for Streamlit 1.54.0), and plotly 7 targets plotly.js 4.0.0.
 * **Visualization:** Plotly
 * **Networking:** Requests plus `NHLClient` for retry, request deduplication, rate limiting, and shared-cache-backed NHL API access
@@ -90,7 +96,12 @@ nhl/
     rarity.py            age-rarity percentile/rank engine plus top-season leaderboard payloads
     baselines.py         aggregate historical baseline builders
     knn_engine.py        hybrid KNN projection engine, memoized per player/metric/toggle set
-    win_prob.py          shared pregame win-probability feature engineering and runtime scoring
+    team_ratings.py      league game table, Elo ratings, shrunk team form, and back-to-back flags shared by trainer and runtime
+    win_prob.py          win-probability artifact validation and scoring
+    season_sim.py        Monte Carlo season and playoff simulator behind the Stanley Cup odds
+    goal_model.py        score distribution behind the 60-minute result and puck-line markets
+    ledger.py            prediction ledger (SQLite): pregame predictions frozen at puck drop, grading, market benchmark, track record
+    xg.py                offline research only: play-by-play expected goals and goalie ratings for train_win_prob.py --phase2-report
     player_pipeline.py   full per-player pipeline, including single-season game-log mode
     team_pipeline.py     team comparison pipeline
     controls.py          Category/Metric and View Options expanders
@@ -100,14 +111,14 @@ nhl/
     comparison.py        Overview/Current Standings detail tabs, chart-season picker helper, clickable predictions panel, and live standings wrapper
     fragments.py         @st.fragment wrappers around the chart, detail tabs, predictions panel, and FAQ button so widget reruns stay scoped
     ui_state.py          session-state helpers plus the one-slot dialog mutex (begin_script_run / begin_dialog_run)
-    stanley_cup.py       standings-board and Cup-pick builder
+    stanley_cup.py       standings board with simulated playoff and Cup odds
     url_params.py        URL query param encode/decode for shareable links and chart season state
-    schedule.py          live defaults (live > finished > soonest upcoming), upcoming games, featured-player helpers, matchup history, and runtime matchup inference
+    schedule.py          live defaults (live > finished > soonest upcoming), upcoming games, featured-player helpers, matchup history, runtime matchup inference, and the season projection
     async_preloader.py   older session-local category preloader kept as an additive helper
 scraper.py               standalone script to refresh the parquet file, including additive Shots / TotalTOIMins columns
-train_win_prob.py        standalone script to train and export pregame win-probability weights
+train_win_prob.py        standalone script to backtest, gate, and export the win-probability model and simulator settings
 nhl_historical_seasons.parquet   ML backbone (generate with scraper.py)
-win_prob_weights.json    offline-trained logistic-regression weights used at runtime
+win_prob_weights.json    version-2 model artifact (weights, rating settings, overtime model, simulator noise, goal model for markets, backtest report)
 ```
 
 ## How to Run Locally
@@ -116,13 +127,14 @@ win_prob_weights.json    offline-trained logistic-regression weights used at run
 3. Open the extracted folder, hold Shift and right click on empty space in the folder and click on "Open in Terminal"
 4. Type this into terminal and hit Enter: `pip install -r requirements.txt`
 5. Ensure `nhl_historical_seasons.parquet` is present in the root directory (required for KNN projections and baselines)
-6. Ensure `win_prob_weights.json` is present in the root directory (required for pregame win probability in the predictions panel)
+6. Ensure `win_prob_weights.json` is present in the root directory (required for pregame win probability and the Stanley Cup odds)
 7. If you want to refresh the historical parquet, run `python scraper.py`
-8. If you want to retrain the pregame win-probability model, run `python train_win_prob.py`
+8. If you want to retrain the win-probability model (do it every offseason), run `python train_win_prob.py`; it prints the backtest and only overwrites the weights when its gates pass. `python train_win_prob.py --phase2-report` re-checks whether expected goals and goalie ratings would improve it (they did not as of 2026-09; report only, first run fetches play-by-play for ~25 minutes)
 9. Launch the app by opening a terminal in the folder and write `streamlit run app.py`
 
 Optional:
-- Set `PUCKPEAK_CACHE_WARMER_ENABLED=1` if you want the process-local background cache warmer to run in development. It is off by default locally so dev runs stay quiet, and the Docker image sets it to `1` so production always warms.
+- Set `PUCKPEAK_CACHE_WARMER_ENABLED=1` if you want the process-local background cache warmer to run in development. It is off by default locally so dev runs stay quiet, and the Docker image sets it to `1` so production always warms. The warmer is also what records the prediction ledger, so without it no track record accumulates.
+- `PUCKPEAK_DATA_DIR` sets where the prediction ledger (`prediction_ledger.sqlite3`) lives; it defaults to `.data/` in the repository.
 
 ## Deployment (Docker)
 
@@ -160,7 +172,9 @@ cd /opt/puck-peak && docker compose up -d --build
 cd /opt/caddy     && docker compose up -d
 ```
 
-No firewall rules needed (ufw inactive; Hetzner Cloud firewall opens 22/80/443 at the edge). No secrets — the NHL APIs are public and the app has no auth. The only env var is `PUCKPEAK_CACHE_WARMER_ENABLED=1`, set in the `Dockerfile` and mirrored in `docker-compose.yml`; without it the background warmer never starts and the first visitor after each container restart pays the full cold-fetch cost inside their own page load.
+No firewall rules needed (ufw inactive; Hetzner Cloud firewall opens 22/80/443 at the edge). No secrets — the NHL APIs are public and the app has no auth. Two env vars, both set in the `Dockerfile` and mirrored in `docker-compose.yml`:
+- `PUCKPEAK_CACHE_WARMER_ENABLED=1`: without it the background warmer never starts, the first visitor after each container restart pays the full cold-fetch cost inside their own page load, and nothing is written to the prediction ledger.
+- `PUCKPEAK_DATA_DIR=/app/.data`: the prediction ledger lives there, on the `puckpeak_data` named volume. Never remove that volume. It holds the public track record, and deleting it resets the record to zero.
 
 ### Redeploy (after pushing a new commit to `main`)
 

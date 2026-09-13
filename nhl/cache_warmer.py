@@ -17,7 +17,13 @@ from nhl.data_loaders import (
     get_top_50_goalies,
     load_all_team_seasons,
 )
-from nhl.schedule import get_featured_players, get_live_or_recent_game, get_upcoming_games
+from nhl.schedule import (
+    capture_prediction_ledger,
+    get_featured_players,
+    get_live_or_recent_game,
+    get_season_projection,
+    get_upcoming_games,
+)
 
 log = logging.getLogger("nhl.cache_warmer")
 
@@ -108,12 +114,17 @@ def _run_live_cycle() -> None:
         "get_upcoming_games:8:60",
         lambda: get_upcoming_games(limit=8, days_ahead=60),
     )
+    # Every live cycle refreshes the prediction ledger until puck drop and grades
+    # finished games. The warmer is the only writer: a page render never writes.
+    _run_safe_task("capture_prediction_ledger", capture_prediction_ledger)
 
 
 def _run_seasonal_cycle() -> None:
     """Warm high-traffic seasonal entry points and a small seed set."""
     _run_safe_task("load_all_team_seasons", load_all_team_seasons)
     _run_safe_task("get_current_nhl_standings", get_current_nhl_standings)
+    # 10,000 simulated seasons: keep them off the visitor's clock.
+    _run_safe_task("get_season_projection", get_season_projection)
 
     for team_abbr in _SEEDED_TEAMS:
         _run_safe_task(

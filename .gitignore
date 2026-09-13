@@ -12,5 +12,6 @@ nhl_age_curves_changelog.txt
 .vscode/
 assets/PP.psd
 .cache/
+.data/
 .pytest_cache/
 tests/

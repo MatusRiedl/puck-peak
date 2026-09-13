@@ -453,7 +453,8 @@ class StylesTests(unittest.TestCase):
         self.assertIn(".stanley-cup-team-logo {", styles_text)
         self.assertIn(".stanley-cup-row-value--pts {", styles_text)
         self.assertIn("stanley-cup-favorite-button-anchor", styles_text)
-        self.assertIn('content: "Cup pick";', styles_text)
+        self.assertIn('content: "Cup favorite";', styles_text)
+        self.assertIn(".stanley-cup-division-window--odds .stanley-cup-col--record {", styles_text)
 
     def test_readme_uses_updated_short_description(self):
         """Keep the repository description aligned with the new branding.

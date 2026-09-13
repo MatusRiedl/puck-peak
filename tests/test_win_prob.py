@@ -1,100 +1,126 @@
 import math
 import unittest
 
+import numpy as np
 import pandas as pd
 
 import nhl.win_prob as win_prob
 
 
-class WinProbFeatureTests(unittest.TestCase):
-    """Cover the shared training/runtime win-probability helpers."""
+def _artifact(**overrides):
+    """Return a small valid version-2 artifact."""
+    payload = {
+        "model_version": 2,
+        "feature_order": ["elo_diff", "sog_share_shrunk_diff", "away_back_to_back"],
+        "coefficients": [0.4, 0.2, 0.1],
+        "intercept": 0.15,
+        "scaler_mean": [2.0, 0.01, 0.2],
+        "scaler_scale": [50.0, 0.04, 0.4],
+        "selected_c": 0.3,
+    }
+    payload.update(overrides)
+    return payload
 
-    def test_compute_team_feature_history_uses_only_prior_games(self):
-        """Pregame features for one row must exclude that row's result."""
-        team_games = pd.DataFrame(
+
+class ArtifactValidationTests(unittest.TestCase):
+    """Cover the artifact contract between the trainer and the runtime."""
+
+    def test_version_one_artifact_is_rejected(self):
+        """The old standings-form model must not be scored with the new features."""
+        with self.assertRaises(ValueError):
+            win_prob.validate_model_artifact(
+                {
+                    "model_version": 1,
+                    "feature_order": ["point_pct_to_date"],
+                    "coefficients": [1.0],
+                    "scaler_mean": [0.0],
+                    "scaler_scale": [1.0],
+                }
+            )
+
+    def test_unknown_or_mismatched_features_are_rejected(self):
+        """A feature the runtime cannot build, or a shape mismatch, fails loudly."""
+        with self.assertRaises(ValueError):
+            win_prob.validate_model_artifact(_artifact(feature_order=["elo_diff", "power_play_pct", "away_back_to_back"]))
+        with self.assertRaises(ValueError):
+            win_prob.validate_model_artifact(_artifact(coefficients=[0.4, 0.2]))
+
+    def test_optional_blocks_are_filled_from_defaults(self):
+        """Missing rating, overtime and simulation blocks fall back to defaults."""
+        validated = win_prob.validate_model_artifact(_artifact())
+
+        self.assertEqual(validated["rating_params"]["elo_k"], win_prob.DEFAULT_RATING_PARAMS["elo_k"])
+        self.assertEqual(validated["overtime_model"], win_prob.DEFAULT_OVERTIME_MODEL)
+        self.assertEqual(validated["simulation"], win_prob.DEFAULT_SIMULATION_PARAMS)
+        self.assertIsNone(validated["goal_model"])
+
+    def test_goal_model_block_is_validated_and_kept(self):
+        """A valid goal model survives validation; a broken one switches the markets off."""
+        kept = win_prob.validate_model_artifact(_artifact(goal_model={"tie_inflation": 0.48, "lead1_transfer": 0.31}))
+        broken = win_prob.validate_model_artifact(_artifact(goal_model={"lead1_transfer": 3.0}))
+
+        self.assertAlmostEqual(kept["goal_model"]["tie_inflation"], 0.48)
+        self.assertIsNone(broken["goal_model"])
+
+
+class ScoringTests(unittest.TestCase):
+    """Cover scalar, vectorized and decomposed scoring."""
+
+    def test_scalar_scoring_matches_exported_weights(self):
+        """Runtime scoring honours exported means, scales, weights and intercept exactly."""
+        features = {"elo_diff": 52.0, "sog_share_shrunk_diff": 0.05, "away_back_to_back": 1.0}
+        scored = win_prob.score_home_win_probability(features, _artifact())
+
+        logit = 0.15 + 0.4 * (52.0 - 2.0) / 50.0 + 0.2 * (0.05 - 0.01) / 0.04 + 0.1 * (1.0 - 0.2) / 0.4
+        self.assertAlmostEqual(scored["logit"], logit)
+        self.assertAlmostEqual(scored["home_win_prob"], 1.0 / (1.0 + math.exp(-logit)))
+        self.assertAlmostEqual(scored["contributions"]["away_back_to_back"], 0.1 * 2.0)
+
+    def test_vectorized_logits_match_scalar_scoring(self):
+        """The simulator's batch path and the card's scalar path agree."""
+        artifact = win_prob.validate_model_artifact(_artifact())
+        frame = pd.DataFrame(
             {
-                "SeasonYear": [2025] * 6,
-                "GameDate": [f"2025-10-{day:02d}" for day in range(1, 7)],
-                "GameId": list(range(1, 7)),
-                "TeamAbbrev": ["DAL"] * 6,
-                "OpponentAbbrev": ["EDM", "COL", "WPG", "VGK", "NSH", "NYR"],
-                "HomeRoadFlag": ["H", "R", "H", "R", "H", "R"],
-                "Points": [2, 0, 2, 2, 0, 2],
-                "Goals": [4, 1, 5, 3, 2, 6],
-                "GoalsAgainst": [2, 4, 2, 1, 3, 2],
-                "PP%": [20.0, 10.0, 30.0, 25.0, 15.0, 40.0],
+                "elo_diff": [52.0, -30.0],
+                "sog_share_shrunk_diff": [0.05, -0.02],
+                "away_back_to_back": [1.0, 0.0],
+                "home_back_to_back": [0.0, 1.0],
             }
         )
+        batch = win_prob.score_home_win_logits(frame, artifact)
+        for position in range(len(frame)):
+            scalar = win_prob.score_home_win_probability(frame.iloc[position].to_dict(), artifact)["logit"]
+            self.assertAlmostEqual(float(batch[position]), scalar)
 
-        featured = win_prob.compute_team_feature_history(team_games)
-        sixth_game = featured.iloc[5]
+    def test_decomposition_reproduces_the_logit_from_team_strengths(self):
+        """constant + strength[home] - strength[away] + flags equals the full logit."""
+        artifact = win_prob.validate_model_artifact(_artifact())
+        home = {"elo": 1560.0, "sog_share_shrunk": 0.53}
+        away = {"elo": 1508.0, "sog_share_shrunk": 0.48}
+        constant, attribute_weights, flag_weights = win_prob.decompose_linear_model(artifact)
 
-        self.assertEqual(int(sixth_game["GamesBefore"]), 5)
-        self.assertAlmostEqual(float(sixth_game["PointPctToDate"]), 0.6)
-        self.assertAlmostEqual(float(sixth_game["L10PointPct"]), 0.6)
-        self.assertAlmostEqual(float(sixth_game["GoalDiffPerGameToDate"]), 0.6)
+        def strength(team):
+            return sum(weight * team[attribute] for attribute, weight in attribute_weights.items())
 
-    def test_score_home_win_probability_matches_exported_weights(self):
-        """Runtime dot-product scoring must honor exported means/scales/weights exactly."""
-        artifact = {
-            "model_version": 1,
-            "feature_order": win_prob.WIN_PROB_FEATURE_ORDER,
-            "coefficients": [0.4, 0.2, -0.1, 0.05, 0.03],
-            "intercept": 0.1,
-            "scaler_mean": [0.0] * len(win_prob.WIN_PROB_FEATURE_ORDER),
-            "scaler_scale": [1.0] * len(win_prob.WIN_PROB_FEATURE_ORDER),
-            "selected_c": 1.0,
-            "min_games": win_prob.MIN_GAMES_FOR_ESTIMATE,
-        }
-        feature_values = {
-            "point_pct_to_date": 0.20,
-            "goal_diff_per_game_to_date": 0.60,
-            "l10_point_pct": 0.15,
-            "l10_goal_diff_per_game": 0.25,
-            "power_play_pct_to_date": 3.50,
-        }
+        decomposed = constant + strength(home) - strength(away) + flag_weights["away_back_to_back"] * 1.0
+        features = {"elo_diff": 52.0, "sog_share_shrunk_diff": 0.05, "away_back_to_back": 1.0}
+        self.assertAlmostEqual(decomposed, win_prob.score_home_win_probability(features, artifact)["logit"])
 
-        scored = win_prob.score_home_win_probability(feature_values, artifact)
-        linear_term = 0.1 + (0.4 * 0.20) + (0.2 * 0.60) - (0.1 * 0.15) + (0.05 * 0.25) + (0.03 * 3.50)
-        expected_probability = 1.0 / (1.0 + math.exp(-linear_term))
+    def test_overtime_is_likelier_in_close_games(self):
+        """A negative slope on |logit| means mismatches reach overtime less often."""
+        artifact = win_prob.validate_model_artifact(_artifact(overtime_model={"intercept": -1.1, "abs_logit_coef": -0.3, "shootout_share": 0.33}))
+        probabilities = win_prob.overtime_probability(np.array([0.0, 1.5, -1.5]), artifact)
 
-        self.assertAlmostEqual(float(scored["home_win_prob"]), expected_probability)
-        self.assertAlmostEqual(float(scored["contributions"]["power_play_pct_to_date"]), 0.105)
+        self.assertAlmostEqual(float(probabilities[0]), 1.0 / (1.0 + math.exp(1.1)))
+        self.assertGreater(float(probabilities[0]), float(probabilities[1]))
+        self.assertAlmostEqual(float(probabilities[1]), float(probabilities[2]))
 
-    def test_build_matchup_snapshot_returns_none_when_team_sample_is_too_small(self):
-        """Do not manufacture a pregame estimate before the minimum-games threshold."""
-        home_games = pd.DataFrame(
-            {
-                "SeasonYear": [2025] * 5,
-                "GameDate": [f"2025-10-{day:02d}" for day in range(1, 6)],
-                "GameId": list(range(1, 6)),
-                "TeamAbbrev": ["TOR"] * 5,
-                "OpponentAbbrev": ["MTL", "OTT", "BUF", "BOS", "DET"],
-                "HomeRoadFlag": ["H", "R", "H", "R", "H"],
-                "Points": [2, 2, 0, 2, 2],
-                "Goals": [4, 5, 2, 4, 3],
-                "GoalsAgainst": [1, 2, 3, 2, 2],
-                "PP%": [25.0, 20.0, 15.0, 22.0, 24.0],
-            }
-        )
-        away_games = pd.DataFrame(
-            {
-                "SeasonYear": [2025] * 4,
-                "GameDate": [f"2025-10-{day:02d}" for day in range(1, 5)],
-                "GameId": list(range(11, 15)),
-                "TeamAbbrev": ["MTL"] * 4,
-                "OpponentAbbrev": ["TOR", "OTT", "BUF", "BOS"],
-                "HomeRoadFlag": ["R", "H", "R", "H"],
-                "Points": [0, 2, 0, 2],
-                "Goals": [2, 3, 1, 4],
-                "GoalsAgainst": [4, 2, 3, 3],
-                "PP%": [16.0, 18.0, 14.0, 19.0],
-            }
-        )
+    def test_top_feature_driver_picks_the_largest_absolute_contribution(self):
+        """The card label names the strongest single driver."""
+        name, value = win_prob.get_top_feature_driver({"contributions": {"elo_diff": 0.2, "away_back_to_back": -0.35}})
 
-        snapshot = win_prob.build_matchup_snapshot(home_games, away_games, min_games=5)
-
-        self.assertIsNone(snapshot)
+        self.assertEqual(name, "away_back_to_back")
+        self.assertAlmostEqual(value, -0.35)
 
 
 if __name__ == "__main__":

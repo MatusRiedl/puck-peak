@@ -1,9 +1,12 @@
+import json
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, mock_open, patch, MagicMock
 
 import pandas as pd
 
 import nhl.data_loaders as data_loaders
+from nhl.win_prob import validate_model_artifact
 
 
 class DataLoaderInvariantTests(unittest.TestCase):
@@ -128,14 +131,15 @@ class WinProbArtifactLoaderTests(unittest.TestCase):
     def test_load_win_prob_weights_validates_and_returns_json_payload(self):
         payload = """
         {
-          "model_version": 1,
-          "feature_order": ["point_pct_to_date", "goal_diff_per_game_to_date", "l10_point_pct", "l10_goal_diff_per_game", "power_play_pct_to_date"],
-          "coefficients": [0.1, 0.2, 0.3, 0.4, 0.5],
-          "intercept": 0.25,
-          "scaler_mean": [0, 0, 0, 0, 0],
-          "scaler_scale": [1, 1, 1, 1, 1],
-          "selected_c": 1.0,
-          "min_games": 5
+          "model_version": 2,
+          "feature_order": ["elo_diff", "goal_diff_shrunk_diff", "home_back_to_back"],
+          "coefficients": [0.3, 0.1, -0.05],
+          "intercept": 0.17,
+          "scaler_mean": [0, 0, 0.1],
+          "scaler_scale": [55, 0.6, 0.3],
+          "selected_c": 0.05,
+          "rating_params": {"elo_k": 6, "elo_home_advantage": 25, "elo_carryover": 0.8, "form_prior_weight": 8},
+          "simulation": {"strength_sd_preseason": 0.4, "strength_sd_late": 0.1}
         }
         """
 
@@ -145,9 +149,116 @@ class WinProbArtifactLoaderTests(unittest.TestCase):
         ):
             loaded = data_loaders.load_win_prob_weights()
 
-        self.assertEqual(loaded["feature_order"][0], "point_pct_to_date")
-        self.assertEqual(len(loaded["coefficients"]), 5)
-        self.assertEqual(int(loaded["min_games"]), 5)
+        self.assertEqual(loaded["feature_order"][0], "elo_diff")
+        self.assertEqual(len(loaded["coefficients"]), 3)
+        self.assertEqual(loaded["rating_params"]["form_prior_weight"], 8.0)
+        self.assertEqual(loaded["simulation"]["strength_sd_preseason"], 0.4)
+
+    def test_load_win_prob_weights_rejects_the_retired_version_one_artifact(self):
+        """A stale v1 file must disable predictions rather than mis-score them."""
+        payload = """
+        {
+          "model_version": 1,
+          "feature_order": ["point_pct_to_date"],
+          "coefficients": [0.1],
+          "intercept": 0.0,
+          "scaler_mean": [0],
+          "scaler_scale": [1]
+        }
+        """
+
+        with patch("nhl.data_loaders.os.path.exists", return_value=True), patch(
+            "builtins.open",
+            mock_open(read_data=payload),
+        ):
+            loaded = data_loaders.load_win_prob_weights()
+
+        self.assertEqual(loaded, {})
+
+    def test_committed_artifact_is_a_valid_version_two_model(self):
+        """The repository's win_prob_weights.json must load and carry its backtest."""
+        artifact_path = Path(__file__).resolve().parents[1] / "win_prob_weights.json"
+        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+
+        validated = validate_model_artifact(payload)
+
+        self.assertEqual(validated["model_version"], 2)
+        self.assertTrue(payload["validation_metrics"]["game_gate"]["passed"])
+        self.assertGreater(len(payload["validation_metrics"]["backtest"]), 0)
+        # Markets ship only with a passed market gate; totals never ship.
+        self.assertTrue(payload["validation_metrics"]["goal_markets"]["gate"]["passed"])
+        self.assertIsNotNone(validated["goal_model"])
+
+
+class LeagueLoaderTests(unittest.TestCase):
+    """Cover the league-wide loaders behind ratings and the season simulator."""
+
+    def setUp(self):
+        for cached in (data_loaders.get_league_game_table, data_loaders.get_league_schedule, data_loaders.get_playoff_bracket):
+            cached.clear()
+
+    def tearDown(self):
+        for cached in (data_loaders.get_league_game_table, data_loaders.get_league_schedule, data_loaders.get_playoff_bracket):
+            cached.clear()
+
+    @patch("nhl.data_loaders.get_client")
+    def test_get_league_game_table_pairs_rows_from_three_league_reports(self, mock_get_client):
+        """One summary, one shooting and one playoff request cover the whole league."""
+        summary_rows = [
+            {"gameId": 2025020001, "gameDate": "2025-10-07", "teamId": 1, "opponentTeamAbbrev": "MTL", "homeRoad": "H", "goalsFor": 3, "goalsAgainst": 3, "wins": 1, "winsInRegulation": 0, "winsInShootout": 1, "otLosses": 0, "shotsForPerGame": 31},
+            {"gameId": 2025020001, "gameDate": "2025-10-07", "teamId": 2, "opponentTeamAbbrev": "TOR", "homeRoad": "R", "goalsFor": 3, "goalsAgainst": 3, "wins": 0, "winsInRegulation": 0, "winsInShootout": 0, "otLosses": 1, "shotsForPerGame": 27},
+        ]
+        shooting_rows = [
+            {"gameId": 2025020001, "teamId": 1, "satFor": 52, "satAgainst": 41},
+            {"gameId": 2025020001, "teamId": 2, "satFor": 41, "satAgainst": 52},
+        ]
+
+        def _fake_get(url, params=None, cache_key=None, ttl=None, timeout=None):
+            if url == data_loaders.TEAM_LIST_URL:
+                return {"data": [{"id": 1, "triCode": "TOR"}, {"id": 2, "triCode": "MTL"}]}
+            if url == data_loaders.TEAM_SHOOTING_URL:
+                return {"data": shooting_rows}
+            if "gameTypeId=3" in params["cayenneExp"]:
+                return {"data": []}
+            return {"data": summary_rows}
+
+        mock_client = MagicMock()
+        mock_client.get.side_effect = _fake_get
+        mock_get_client.return_value = mock_client
+
+        table = data_loaders.get_league_game_table(2025)
+
+        self.assertEqual(len(table), 1)
+        self.assertEqual(int(table.iloc[0]["HomeWin"]), 1)
+        self.assertEqual(table.iloc[0]["ResultType"], "SO")
+        self.assertEqual(float(table.iloc[0]["HomeSatFor"]), 52.0)
+        cache_keys = [call.kwargs.get("cache_key") for call in mock_client.get.call_args_list]
+        self.assertIn("league_team_games:summary:20252026:2", cache_keys)
+        self.assertIn("league_team_games:summaryshooting:20252026:2", cache_keys)
+        self.assertIn("league_team_games:summary:20252026:3", cache_keys)
+
+    @patch("nhl.data_loaders.get_client")
+    def test_get_league_schedule_drops_exhibitions_and_maps_team_ids(self, mock_get_client):
+        """Only regular-season and playoff games reach the simulator."""
+        def _fake_get(url, params=None, cache_key=None, ttl=None, timeout=None):
+            if url == data_loaders.TEAM_LIST_URL:
+                return {"data": [{"id": 12, "triCode": "CAR"}, {"id": 13, "triCode": "FLA"}]}
+            return {
+                "data": [
+                    {"id": 2026020001, "gameDate": "2026-09-29", "gameType": 2, "gameStateId": 1, "homeTeamId": 12, "visitingTeamId": 13},
+                    {"id": 2026090001, "gameDate": "2027-02-10", "gameType": 9, "gameStateId": 1, "homeTeamId": 12, "visitingTeamId": 13},
+                ]
+            }
+
+        mock_client = MagicMock()
+        mock_client.get.side_effect = _fake_get
+        mock_get_client.return_value = mock_client
+
+        schedule_df = data_loaders.get_league_schedule(2026)
+
+        self.assertEqual(list(schedule_df["GameId"]), [2026020001])
+        self.assertEqual(schedule_df.iloc[0]["HomeTeam"], "CAR")
+        self.assertEqual(schedule_df.iloc[0]["AwayTeam"], "FLA")
 
 
 class PlayerLandingLoaderTests(unittest.TestCase):

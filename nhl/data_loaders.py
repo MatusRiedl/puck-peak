@@ -17,9 +17,11 @@ from nhl.cache import get_cache, T1_TTL, T2_DEFAULT_TTL, effective_ttl
 from nhl.constants import (
     ACTIVE_TEAMS,
     current_season_year,
+    LEAGUE_SCHEDULE_URL,
     NHLE_DEFAULT_MULTIPLIER,
     NHLE_MULTIPLIERS,
     PLAYER_GAME_LOG_URL,
+    PLAYOFF_BRACKET_URL,
     SEASON_GOALIE_SUMMARY_URL,
     SEASON_SKATER_SUMMARY_URL,
     SEARCH_URL,
@@ -27,11 +29,13 @@ from nhl.constants import (
     ROSTER_URL,
     TEAM_FOUNDED,
     TEAM_LIST_URL,
+    TEAM_SHOOTING_URL,
     TEAM_STATS_URL,
     TEAM_METRICS,
     TEAM_LINEAGES,
     normalize_league_abbrev,
 )
+from nhl.team_ratings import build_league_game_table, build_league_schedule
 from nhl.win_prob import validate_model_artifact
 
 
@@ -1090,6 +1094,7 @@ def get_current_nhl_standings() -> pd.DataFrame:
                 "goalDiffPerGame": (goal_diff / games_played) if games_played > 0 else 0.0,
                 "pointPctg": float(row.get("pointPctg", 0.0) or 0.0),
                 "regulationWins": int(row.get("regulationWins", 0) or 0),
+                "regulationPlusOtWins": int(row.get("regulationPlusOtWins", 0) or 0),
                 "regulationPlusOtWinPctg": float(row.get("regulationPlusOtWinPctg", 0.0) or 0.0),
                 "streakCode": str(row.get("streakCode", "") or "").strip(),
                 "streakCount": int(row.get("streakCount", 0) or 0),
@@ -1126,6 +1131,127 @@ def get_current_nhl_standings() -> pd.DataFrame:
             kind="stable",
         ).reset_index(drop=True)
     return standings_df
+
+
+def _get_team_id_to_abbrev_map() -> dict[int, str]:
+    """Return the NHL team id -> tri-code map, sharing ``load_all_team_seasons``' cache entry."""
+    payload = get_client().get(url=TEAM_LIST_URL, cache_key="team_list", ttl=T1_TTL, timeout=15)
+    rows = payload.get("data", []) if isinstance(payload, dict) else []
+    mapping: dict[int, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            team_id = int(row.get("id", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        tri_code = str(row.get("triCode", "") or "").strip().upper()
+        if team_id > 0 and tri_code:
+            mapping[team_id] = tri_code
+    return mapping
+
+
+def _fetch_league_report_rows(url: str, report: str, season_year: int, game_type_id: int) -> list[dict]:
+    """Fetch one league-wide per-team game report for a season and game type."""
+    season_id = _season_year_to_id(season_year)
+    if season_id is None:
+        return []
+    payload = get_client().get(
+        url=url,
+        params={
+            "isGame": "true",
+            "limit": -1,
+            "start": 0,
+            "sort": "gameDate",
+            "cayenneExp": f"seasonId={season_id} and gameTypeId={int(game_type_id)}",
+        },
+        cache_key=f"league_team_games:{report}:{season_id}:{int(game_type_id)}",
+        ttl=effective_ttl(season_year),
+        timeout=30,
+    )
+    rows = payload.get("data", []) if isinstance(payload, dict) else []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+@st.cache_data(ttl=3600)
+def get_league_game_table(season_year: int) -> pd.DataFrame:
+    """Return every completed regular-season and playoff game of one season, league-wide.
+
+    Three requests per season (regular-season summary, regular-season 5v5 shot
+    attempts, playoff summary) cover all 32 teams, which is what the Elo ratings and
+    the season simulator need.
+
+    Args:
+        season_year: Four-digit season start year.
+
+    Returns:
+        ``team_ratings.GAME_TABLE_COLUMNS`` rows, or an empty frame on failure.
+    """
+    try:
+        team_map = _get_team_id_to_abbrev_map()
+        if not team_map:
+            return pd.DataFrame()
+        regular = _fetch_league_report_rows(TEAM_STATS_URL, "summary", season_year, 2)
+        shooting = _fetch_league_report_rows(TEAM_SHOOTING_URL, "summaryshooting", season_year, 2) if regular else []
+        playoffs = _fetch_league_report_rows(TEAM_STATS_URL, "summary", season_year, 3)
+        return build_league_game_table(regular + playoffs, shooting, team_map)
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def get_league_schedule(season_year: int) -> pd.DataFrame:
+    """Return every regular-season and playoff game on one season's schedule.
+
+    One request to the stats ``game`` endpoint, played and unplayed games alike. The
+    simulator takes the remaining schedule from it, and the prediction cards take
+    back-to-back flags from it.
+
+    Args:
+        season_year: Four-digit season start year.
+
+    Returns:
+        ``team_ratings.SCHEDULE_COLUMNS`` rows, or an empty frame on failure.
+    """
+    season_id = _season_year_to_id(season_year)
+    if season_id is None:
+        return pd.DataFrame()
+    try:
+        team_map = _get_team_id_to_abbrev_map()
+        payload = get_client().get(
+            url=LEAGUE_SCHEDULE_URL,
+            params={"cayenneExp": f"season={season_id} and gameType>=2"},
+            cache_key=f"league_schedule:{season_id}",
+            ttl=effective_ttl(season_year),
+            timeout=30,
+        )
+        rows = payload.get("data", []) if isinstance(payload, dict) else []
+        return build_league_schedule(rows, team_map)
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=900)
+def get_playoff_bracket(season_year: int) -> dict:
+    """Return the raw playoff bracket payload for the playoffs that close ``season_year``.
+
+    Args:
+        season_year: Four-digit season start year (2025 asks for the 2026 playoffs).
+
+    Returns:
+        The bracket payload, or ``{}``. Before the playoffs its ``series`` list is empty.
+    """
+    try:
+        end_year = int(season_year) + 1
+        payload = get_client().get(
+            url=PLAYOFF_BRACKET_URL.format(end_year),
+            cache_key=f"playoff_bracket:{end_year}",
+            ttl=effective_ttl(int(season_year)),
+            timeout=15,
+        )
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
 
 
 @st.cache_data(ttl=3600)

@@ -39,6 +39,24 @@ TEAM_STATS_URL = "https://api.nhle.com/stats/rest/en/team/summary"
 TEAM_LIST_URL  = "https://api.nhle.com/stats/rest/en/team"
 """Team-list endpoint; used to build teamId -> triCode lookup map."""
 
+TEAM_SHOOTING_URL = "https://api.nhle.com/stats/rest/en/team/summaryshooting"
+"""Team 5v5 shot-attempt report; with isGame=true it returns one row per team per game."""
+
+LEAGUE_SCHEDULE_URL = "https://api.nhle.com/stats/rest/en/game"
+"""Every game of a season (id, date, teams, state) in one request; filter with cayenneExp."""
+
+PLAYOFF_BRACKET_URL = "https://api-web.nhle.com/v1/playoff-bracket/{}"
+"""Playoff bracket with live series state; format with the calendar year the playoffs end."""
+
+STANDINGS_SEASON_URL = "https://api-web.nhle.com/v1/standings-season"
+"""Per-season standings metadata: start/end dates and whether wild cards are in use."""
+
+STANDINGS_DATE_URL = "https://api-web.nhle.com/v1/standings/{}"
+"""Standings as of one date (``YYYY-MM-DD``); used for historical division membership."""
+
+PARTNER_ODDS_URL = "https://api-web.nhle.com/v1/partner-game/{}/now"
+"""NHL.com betting-partner odds for the next odds date; format with a country code (``CA``, ``US``...)."""
+
 # ---------------------------------------------------------------------------
 # Active NHL franchises (as of 2024-25 season)
 # ---------------------------------------------------------------------------

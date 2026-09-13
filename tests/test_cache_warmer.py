@@ -88,12 +88,16 @@ class CacheWarmerTests(unittest.TestCase):
         ) as mock_featured, patch(
             "nhl.cache_warmer.get_upcoming_games",
             return_value=[],
-        ) as mock_upcoming:
+        ) as mock_upcoming, patch(
+            "nhl.cache_warmer.capture_prediction_ledger",
+            return_value={},
+        ) as mock_capture:
             cache_warmer._run_live_cycle()
 
         mock_game.assert_called_once_with()
         mock_featured.assert_called_once_with("EDM", "DAL")
         mock_upcoming.assert_called_once_with(limit=8, days_ahead=60)
+        mock_capture.assert_called_once_with()
 
     def test_run_live_cycle_skips_featured_players_when_no_matchup_is_available(self):
         """No featured-player warm-up should run when the live game lookup fails."""
@@ -102,6 +106,9 @@ class CacheWarmerTests(unittest.TestCase):
         ) as mock_featured, patch(
             "nhl.cache_warmer.get_upcoming_games",
             return_value=[],
+        ), patch(
+            "nhl.cache_warmer.capture_prediction_ledger",
+            return_value={},
         ):
             cache_warmer._run_live_cycle()
 
@@ -112,6 +119,9 @@ class CacheWarmerTests(unittest.TestCase):
         with patch("nhl.cache_warmer.load_all_team_seasons") as mock_team_seasons, patch(
             "nhl.cache_warmer.get_current_nhl_standings",
         ) as mock_standings, patch(
+            "nhl.cache_warmer.get_season_projection",
+            return_value={},
+        ) as mock_projection, patch(
             "nhl.cache_warmer.get_team_roster",
             return_value={},
         ) as mock_team_roster, patch(
@@ -122,6 +132,7 @@ class CacheWarmerTests(unittest.TestCase):
 
         mock_team_seasons.assert_called_once_with()
         mock_standings.assert_called_once_with()
+        mock_projection.assert_called_once_with()
         self.assertEqual(
             mock_team_roster.call_args_list,
             [call("EDM"), call("PIT"), call("WSH"), call("COL"), call("TOR"), call("NYR")],

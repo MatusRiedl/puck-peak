@@ -577,6 +577,77 @@ div.element-container:has(.faq-btn-anchor) + div.element-container button:hover 
     font-weight: 600;
     color: #c3c3c3;
 }
+.track-record {
+    margin: 0 0 0.6rem 0;
+    padding: 0.5rem 0.7rem;
+    border: 1px solid rgba(71, 85, 105, 0.42);
+    border-radius: 12px;
+    background: rgba(15, 23, 42, 0.72);
+    color: rgba(226, 232, 240, 0.9);
+    font-size: 0.78rem;
+    line-height: 1.35;
+}
+.track-record__title {
+    margin-bottom: 0.18rem;
+    color: #8f9bb0;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+.track-record__line--muted {
+    color: rgba(203, 213, 225, 0.66);
+}
+.lgc-markets {
+    width: 100%;
+    margin-top: 0.28rem;
+    padding-top: 0.3rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.lgc-markets__title {
+    margin: 0.12rem 0 0.18rem;
+    color: #8f9bb0;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+.lgc-markets__row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.3rem;
+}
+.lgc-markets__row--three {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.lgc-market {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 0;
+    padding: 0.2rem 0.25rem;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.04);
+}
+.lgc-market__label {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #aeb7c6;
+    font-size: 0.68rem;
+}
+.lgc-market__pct {
+    color: #f1f5f9;
+    font-size: 0.86rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+}
+.lgc-market__odds {
+    color: #fde68a;
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+}
 .lgc-prob-section {
     /* probability labels + bar embedded below the header block */
 }
@@ -684,7 +755,7 @@ div.element-container:has(.faq-btn-anchor) + div.element-container button:hover 
     line-height: 1.2;
     overflow-wrap: anywhere;
 }
-.live-games-probability__meta--playoff {
+.live-games-probability__meta--note {
     margin-top: 0.18rem;
     padding-top: 0.18rem;
     border-top: 1px solid rgba(255, 255, 255, 0.08);
@@ -1186,13 +1257,85 @@ div.element-container:has(.nhl-chart-toolbar) + div.element-container {
     color: #ffffff;
     font-weight: 800;
 }
+.stanley-cup-table-head > div {
+    white-space: nowrap;
+}
+.stanley-cup-table-head > div:not(.stanley-cup-table-head__team) {
+    text-align: center;
+}
+.stanley-cup-division-window--odds {
+    container-type: inline-size;
+}
+.stanley-cup-division-window--odds .stanley-cup-table-head,
+.stanley-cup-division-window--odds .stanley-cup-row {
+    grid-template-columns: minmax(0, 1.5fr) repeat(5, minmax(26px, 0.32fr)) repeat(2, minmax(62px, 0.55fr));
+}
+/* Keyed to the division window, not the viewport: in the two-column board a desktop window is
+   ~430px wide, and eight columns there truncated nearly every team name. GP, Pts and the two odds
+   columns stay; W/L/OTL remain one click away in the team dialog. */
+@container (max-width: 560px) {
+    .stanley-cup-division-window--odds .stanley-cup-col--record {
+        display: none;
+    }
+    .stanley-cup-division-window--odds .stanley-cup-table-head,
+    .stanley-cup-division-window--odds .stanley-cup-row {
+        grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(30px, 0.4fr)) repeat(2, minmax(62px, 0.55fr));
+    }
+}
+.stanley-cup-division-window--preseason .stanley-cup-table-head,
+.stanley-cup-division-window--preseason .stanley-cup-row {
+    grid-template-columns: minmax(0, 1.85fr) repeat(3, minmax(62px, 0.55fr));
+}
+.stanley-cup-row-badge--icon {
+    padding: 0.12rem 0.38rem;
+    letter-spacing: 0;
+}
+.stanley-cup-row-value--odds {
+    color: rgba(199, 210, 254, 0.95);
+    font-variant-numeric: tabular-nums;
+}
+.stanley-cup-row-value--cup {
+    color: #fde68a;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+}
+.stanley-cup-contenders {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem 0.8rem;
+    margin-top: 0.4rem;
+    color: rgba(203, 213, 225, 0.8);
+    font-size: 0.8rem;
+}
+.stanley-cup-contender strong {
+    color: #fde68a;
+}
+.stanley-cup-champion-anchor {
+    display: inline-flex;
+    align-items: center;
+    margin-right: 0.45rem;
+}
+.stanley-cup-champion-anchor::before {
+    content: "Champion";
+    display: inline-flex;
+    align-items: center;
+    padding: 0.18rem 0.46rem;
+    border: 1px solid rgba(250, 204, 21, 0.34);
+    border-radius: 999px;
+    background: rgba(250, 204, 21, 0.12);
+    color: rgba(254, 240, 138, 0.98);
+    font-size: 0.66rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
 .stanley-cup-favorite-button-anchor {
     display: inline-flex;
     align-items: center;
     margin-right: 0.45rem;
 }
 .stanley-cup-favorite-button-anchor::before {
-    content: "Cup pick";
+    content: "Cup favorite";
     display: inline-flex;
     align-items: center;
     padding: 0.18rem 0.46rem;
@@ -1666,6 +1809,10 @@ div:has(> #main-chart-layout) + div [data-testid="stHorizontalBlock"] {
     .stanley-cup-row {
         grid-template-columns: minmax(0, 1.7fr) repeat(5, minmax(28px, 0.42fr));
         gap: 0.28rem;
+    }
+    .stanley-cup-division-window--preseason .stanley-cup-table-head,
+    .stanley-cup-division-window--preseason .stanley-cup-row {
+        grid-template-columns: minmax(0, 1.5fr) repeat(3, minmax(56px, 0.55fr));
     }
     .stanley-cup-table-head {
         padding: 0 0.85rem 0.44rem 0.85rem;
