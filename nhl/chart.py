@@ -44,7 +44,8 @@ BASELINE_LINE_COLOR = "rgba(190, 190, 190, 0.72)"
 BASELINE_LINE_OPACITY = 0.65
 BASELINE_MARKER_COLOR = "rgba(220, 220, 220, 0.92)"
 PROJECTION_LINE_WIDTH = 2
-PROJECTION_LINE_OPACITY = 0.90
+PROJECTION_LINE_OPACITY = 0.65
+PROJECTION_LINE_DASH = "3px,8px"  # Plotly 'dot' is 3px,3px at this width; wider gaps separate it from real data
 PROJECTION_GLOW_OUTER_WIDTH = 5
 PROJECTION_GLOW_OUTER_OPACITY = 0.16
 PROJECTION_GLOW_INNER_WIDTH = 2
@@ -1379,7 +1380,7 @@ def _apply_special_trace_styling(fig: go.Figure, player_colors: dict[str, str | 
             proj_color = player_colors.get(player_name) or "gray"
             trace.legendgroup = player_name
             trace.showlegend = False
-            trace.line.dash = 'dot'
+            trace.line.dash = PROJECTION_LINE_DASH
             trace.line.width = PROJECTION_LINE_WIDTH
             trace.line.color = _with_alpha(proj_color, PROJECTION_LINE_OPACITY)
             trace.marker.color = proj_color
@@ -1977,7 +1978,7 @@ def render_chart(
                 line=dict(
                     color=_with_alpha(proj['color'], PROJECTION_GLOW_OUTER_OPACITY),
                     width=PROJECTION_GLOW_OUTER_WIDTH,
-                    dash='dot',
+                    dash=PROJECTION_LINE_DASH,
                 ),
                 showlegend=False,
                 legendgroup=proj['legendgroup'],
@@ -1991,7 +1992,7 @@ def render_chart(
                 line=dict(
                     color=_with_alpha(proj['color'], PROJECTION_GLOW_INNER_OPACITY),
                     width=PROJECTION_GLOW_INNER_WIDTH,
-                    dash='dot',
+                    dash=PROJECTION_LINE_DASH,
                 ),
                 showlegend=False,
                 legendgroup=proj['legendgroup'],

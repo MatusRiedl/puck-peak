@@ -479,7 +479,10 @@ class ChartTests(unittest.TestCase):
         self.assertEqual(real_trace.line.color, expected_color_map["Artemi Panarin"])
         self.assertNotEqual(real_trace.line.color, "#636efa")
         self.assertFalse(proj_trace.showlegend)
-        self.assertEqual(proj_trace.line.dash, "dot")
+        self.assertEqual(proj_trace.line.dash, chart_module.PROJECTION_LINE_DASH)
+        glow_traces = [trace for trace in fig.data if trace.name.startswith("_proj_glow_")]
+        self.assertTrue(glow_traces)
+        self.assertTrue(all(trace.line.dash == chart_module.PROJECTION_LINE_DASH for trace in glow_traces))
         self.assertEqual(
             proj_trace.line.color,
             chart_module._with_alpha(real_trace.line.color, chart_module.PROJECTION_LINE_OPACITY),
