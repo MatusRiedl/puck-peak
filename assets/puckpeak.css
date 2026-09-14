@@ -1263,28 +1263,49 @@ div.element-container:has(.nhl-chart-toolbar) + div.element-container {
 .stanley-cup-table-head > div:not(.stanley-cup-table-head__team) {
     text-align: center;
 }
-.stanley-cup-division-window--odds {
+.stanley-cup-division-window {
     container-type: inline-size;
 }
 .stanley-cup-division-window--odds .stanley-cup-table-head,
 .stanley-cup-division-window--odds .stanley-cup-row {
     grid-template-columns: minmax(0, 1.5fr) repeat(5, minmax(26px, 0.32fr)) repeat(2, minmax(62px, 0.55fr));
 }
-/* Keyed to the division window, not the viewport: in the two-column board a desktop window is
-   ~430px wide, and eight columns there truncated nearly every team name. GP, Pts and the two odds
-   columns stay; W/L/OTL remain one click away in the team dialog. */
+/* Keyed to the division window, not the viewport: eight columns in a two-column board truncated
+   nearly every team name. The value columns get fixed widths that fit their widest text
+   ("Playoffs", "<0.1%"), so the team name takes all the width that is left. W/L/OTL (and GP in
+   the narrowest windows) remain one click away in the team dialog. */
 @container (max-width: 560px) {
     .stanley-cup-division-window--odds .stanley-cup-col--record {
         display: none;
     }
     .stanley-cup-division-window--odds .stanley-cup-table-head,
     .stanley-cup-division-window--odds .stanley-cup-row {
-        grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(30px, 0.4fr)) repeat(2, minmax(62px, 0.55fr));
+        grid-template-columns: minmax(0, 1fr) repeat(2, 2.3rem) 4rem 2.9rem;
     }
 }
 .stanley-cup-division-window--preseason .stanley-cup-table-head,
 .stanley-cup-division-window--preseason .stanley-cup-row {
-    grid-template-columns: minmax(0, 1.85fr) repeat(3, minmax(62px, 0.55fr));
+    grid-template-columns: minmax(0, 1fr) 2.3rem 4rem 2.9rem;
+}
+/* Two-column desktop windows run ~320-470px, and at 1500px the star badge cut the favourite's
+   own name to "H…". The favourite row keeps its accent border and the meta line above names the
+   team, so the badge gives way first; GP goes only in the narrowest windows. */
+@container (max-width: 440px) {
+    .stanley-cup-row-badge {
+        display: none;
+    }
+    .stanley-cup-row-team {
+        gap: 0.4rem;
+    }
+}
+@container (max-width: 380px) {
+    .stanley-cup-division-window--odds .stanley-cup-col--gp {
+        display: none;
+    }
+    .stanley-cup-division-window--odds .stanley-cup-table-head,
+    .stanley-cup-division-window--odds .stanley-cup-row {
+        grid-template-columns: minmax(0, 1fr) 2.3rem 4rem 2.9rem;
+    }
 }
 .stanley-cup-row-badge--icon {
     padding: 0.12rem 0.38rem;
@@ -1809,10 +1830,6 @@ div:has(> #main-chart-layout) + div [data-testid="stHorizontalBlock"] {
     .stanley-cup-row {
         grid-template-columns: minmax(0, 1.7fr) repeat(5, minmax(28px, 0.42fr));
         gap: 0.28rem;
-    }
-    .stanley-cup-division-window--preseason .stanley-cup-table-head,
-    .stanley-cup-division-window--preseason .stanley-cup-row {
-        grid-template-columns: minmax(0, 1.5fr) repeat(3, minmax(56px, 0.55fr));
     }
     .stanley-cup-table-head {
         padding: 0 0.85rem 0.44rem 0.85rem;

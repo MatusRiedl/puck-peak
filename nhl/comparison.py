@@ -2102,7 +2102,7 @@ def _build_current_standings_board_markup(board: dict) -> str:
     head_cells: list[str] = ["<div class='stanley-cup-table-head__team'>Team</div>"]
     if show_record:
         head_cells.extend([
-            "<div>GP</div>",
+            "<div class='stanley-cup-col--gp'>GP</div>",
             "<div class='stanley-cup-col--record'>W</div>",
             "<div class='stanley-cup-col--record'>L</div>",
             "<div class='stanley-cup-col--record'>OTL</div>",
@@ -2158,7 +2158,7 @@ def _build_current_standings_board_markup(board: dict) -> str:
             value_cells: list[str] = []
             if show_record:
                 value_cells.extend([
-                    f"<div class='stanley-cup-row-value'>{int(team.get('games_played', 0) or 0)}</div>",
+                    f"<div class='stanley-cup-row-value stanley-cup-col--gp'>{int(team.get('games_played', 0) or 0)}</div>",
                     f"<div class='stanley-cup-row-value stanley-cup-col--record'>{int(team.get('wins', 0) or 0)}</div>",
                     f"<div class='stanley-cup-row-value stanley-cup-col--record'>{int(team.get('losses', 0) or 0)}</div>",
                     f"<div class='stanley-cup-row-value stanley-cup-col--record'>{int(team.get('ot_losses', 0) or 0)}</div>",
