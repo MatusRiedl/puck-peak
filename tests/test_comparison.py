@@ -39,7 +39,12 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(get_panel_tab_ids(), {"overview", "current-standings"})
 
     def test_live_game_card_html_includes_short_names_logos_and_probability_strip(self):
-        """Render one unified predictions card with short team names and odds."""
+        """Render one unified predictions card: short team names, win bar and the modal hint.
+
+        The card carries no odds detail. Fair odds, the 60-minute result, the puck line
+        and the model notes live in the matchup modal, so desktop and mobile match and
+        there is no hover popover.
+        """
         html = _build_live_game_card_html(
             {
                 "away_abbr": "DET",
@@ -73,14 +78,14 @@ class ComparisonTests(unittest.TestCase):
         self.assertIn("66%", html)
         self.assertIn("live-game-card--home-lead", html)
         self.assertIn("live-games-probability__divider", html)
-        self.assertIn("Fair odds: Red Wings 2.94 · Maple Leafs 1.52", html)
-        self.assertIn("Back-to-back: Red Wings", html)
-        self.assertIn("Early season: ratings still lean on last season.", html)
-        self.assertNotIn("Goalie proxy", html)
-        self.assertNotIn("60-minute result", html)
+        self.assertIn("<span class='lgc-footer__hint'>Odds &amp; head-to-head ›</span>", html)
+        # The early-season caveat stays on the card as a tag; the full sentence is in the modal.
+        self.assertIn("<span class='lgc-footer__note'>Early-season estimate</span>", html)
+        for moved_to_modal in ("Fair odds", "Back-to-back", "Model:", "After 60 minutes", "Puck line", "lgc-meta-popover"):
+            self.assertNotIn(moved_to_modal, html)
 
-    def test_live_game_card_html_shows_sixty_minute_and_puck_line_markets(self):
-        """Markets render away/draw/home with probabilities and fair odds; the favourite takes -1.5."""
+    def test_live_game_card_html_has_no_early_season_tag_once_ratings_have_settled(self):
+        """The tag only appears while the model flags the game as early-season."""
         html = _build_live_game_card_html(
             {
                 "away_abbr": "DET",
@@ -90,24 +95,12 @@ class ComparisonTests(unittest.TestCase):
                 "start_label_cest": "Tue 10 Mar, 01:00 CET",
                 "venue": "",
                 "game_type": 2,
-                "pregame_win_prob": {
-                    "away_pct": 38,
-                    "home_pct": 62,
-                    "model_label": "Model: TOR edge from team rating.",
-                    "markets": {
-                        "regulation": {"away": 0.29, "draw": 0.22, "home": 0.49},
-                        "puck_line": {"home_minus_1_5": 0.25, "away_minus_1_5": 0.12},
-                    },
-                },
+                "pregame_win_prob": {"away_pct": 38, "home_pct": 62, "early_season": False},
             }
         )
 
-        self.assertIn("60-minute result", html)
-        self.assertIn("<span class='lgc-market__label'>Red Wings</span><span class='lgc-market__pct'>29%</span><span class='lgc-market__odds'>3.45</span>", html)
-        self.assertIn("<span class='lgc-market__label'>Draw</span><span class='lgc-market__pct'>22%</span><span class='lgc-market__odds'>4.55</span>", html)
-        self.assertIn("<span class='lgc-market__label'>Maple Leafs −1.5</span><span class='lgc-market__pct'>25%</span><span class='lgc-market__odds'>4.00</span>", html)
-        self.assertIn("<span class='lgc-market__label'>Red Wings +1.5</span><span class='lgc-market__pct'>75%</span><span class='lgc-market__odds'>1.33</span>", html)
-        self.assertNotIn("Over", html)
+        self.assertIn("Odds &amp; head-to-head ›", html)
+        self.assertNotIn("lgc-footer__note", html)
 
     def test_live_game_card_html_falls_back_to_muted_copy_without_probability(self):
         """Show a muted placeholder when pregame odds are unavailable."""
@@ -126,6 +119,9 @@ class ComparisonTests(unittest.TestCase):
 
         self.assertIn("Estimate unavailable right now.", html)
         self.assertIn("live-game-card--no-prob", html)
+        # Without a prediction the modal has only the history, and the hint says so.
+        self.assertIn("<span class='lgc-footer__hint'>Head-to-head ›</span>", html)
+        self.assertNotIn("Odds &amp;", html)
 
     def test_live_game_card_html_marks_preseason_games_as_exhibitions(self):
         """Preseason games are listed but never predicted."""
@@ -210,6 +206,7 @@ class ComparisonTests(unittest.TestCase):
         # Still reachable by keyboard and announced as an activatable control.
         self.assertIn("role='button'", html)
         self.assertIn("tabindex='0'", html)
+        self.assertIn("aria-label='Open odds and matchup history for Detroit Red Wings at Toronto Maple Leafs'", html)
 
     def test_live_game_card_href_builder_still_produces_a_share_link(self):
         """The ?mh= deep link is retained for shared/pasted URLs, just not on the card."""

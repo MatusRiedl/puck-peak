@@ -33,7 +33,12 @@ from nhl.dialog import (
     show_player_identity_details,
     show_team_identity_details,
 )
-from nhl.schedule import get_season_projection, get_track_record, get_upcoming_games
+from nhl.schedule import (
+    PREDICTIONS_PANEL_MATCH_LIMIT,
+    get_season_projection,
+    get_track_record,
+    get_upcoming_games,
+)
 from nhl.stanley_cup import (
     BOARD_MODE_CHAMPION,
     BOARD_MODE_ODDS,
@@ -88,10 +93,6 @@ _DEFAULT_PLAYER_RANK_COLOR = "#4caf50"
 _CARD_CONTEXT_TEXT_COLOR = "#b3b3b3"
 _PROBABILITY_BAR_LIGHTNESS = 0.36
 _PROBABILITY_BAR_SATURATION = 0.68
-# Keep the right-rail prediction batch modest. Cold loads above this count
-# trigger noticeably more NHL API rate-limit fallbacks, which surface as
-# "Estimate unavailable." cards near the bottom of the list.
-_PREDICTIONS_PANEL_MATCH_LIMIT = 8
 _CATEGORY_TAB_KEYS = {
     "Skater": "panel_tab_skater",
     "Goalie": "panel_tab_goalie",
@@ -1212,7 +1213,9 @@ def _build_live_game_card_html(game: dict) -> str:
 
     Combines team logos, time/venue detail, and win-probability bar into a
     single ``.live-game-card`` div with team-color background illumination
-    that scales with prediction confidence.
+    that scales with prediction confidence. The card carries no odds detail:
+    fair odds, the 60-minute result and the puck line live in the matchup
+    modal the card opens, so desktop and mobile show the same thing.
 
     Args:
         game: Normalized game dict returned by ``get_upcoming_games()``.
@@ -1313,48 +1316,11 @@ def _build_live_game_card_html(game: dict) -> str:
         )
         away_short_esc = escape(away_short_name)
         home_short_esc = escape(home_short_name)
-        model_label = escape(str(probability.get("model_label", "") or "").strip())
-        meta_lines: list[str] = []
-        if model_label:
-            meta_lines.append(f"<div class='live-games-probability__meta'>{model_label}</div>")
-        try:
-            fair_odds_away = float(probability.get("fair_odds_away") or 0.0)
-            fair_odds_home = float(probability.get("fair_odds_home") or 0.0)
-        except (TypeError, ValueError):
-            fair_odds_away = fair_odds_home = 0.0
-        if fair_odds_away > 1.0 and fair_odds_home > 1.0:
-            meta_lines.append(
-                "<div class='live-games-probability__meta'>"
-                f"Fair odds: {away_short_esc} {fair_odds_away:.2f} · {home_short_esc} {fair_odds_home:.2f}"
-                "</div>"
-            )
-        markets_markup = _build_game_markets_markup(probability.get("markets"), away_short_name, home_short_name, home_leading or is_tied)
-        if markets_markup:
-            meta_lines.append(markets_markup)
-        tired_teams = [
-            short_name
-            for short_name, flag in ((away_short_name, probability.get("away_back_to_back")), (home_short_name, probability.get("home_back_to_back")))
-            if flag
-        ]
-        if tired_teams:
-            meta_lines.append(
-                f"<div class='live-games-probability__meta'>Back-to-back: {escape(' & '.join(tired_teams))}</div>"
-            )
-        # Early in a season a team's rating is still mostly last season's. Say so rather
-        # than passing it off as current form.
-        if probability.get("early_season"):
-            meta_lines.append(
-                "<div class='live-games-probability__meta live-games-probability__meta--note'>"
-                "Early season: ratings still lean on last season."
-                "</div>"
-            )
-        meta_block = (
-            "<div class='lgc-meta-popover'>"
-            "<div class='lgc-meta'>"
-            f"{''.join(meta_lines)}"
-            "</div>"
-            "</div>"
-        )
+        footer_text = "Odds &amp; head-to-head ›"
+        # Early in a season a team's rating is still mostly last season's. The full
+        # sentence is in the modal; the card keeps a tag so the percentage never
+        # passes for current form.
+        footer_note = "Early-season estimate" if probability.get("early_season") else ""
 
         prob_section = (
             "<div class='lgc-prob-section'>"
@@ -1376,7 +1342,8 @@ def _build_live_game_card_html(game: dict) -> str:
             quote=True,
         )
     else:
-        meta_block = ""
+        footer_text = "Head-to-head ›"
+        footer_note = ""
         # Preseason lineups are mostly prospects, so exhibitions never get a prediction.
         muted_text = (
             "Exhibition — no prediction."
@@ -1393,6 +1360,7 @@ def _build_live_game_card_html(game: dict) -> str:
 
     away_short_esc = escape(away_short_name)
     home_short_esc = escape(home_short_name)
+    footer_note_markup = f"<span class='lgc-footer__note'>{footer_note}</span>" if footer_note else ""
 
     return (
         f"<div class='live-game-card live-game-card--{panel_state}' style='{card_style}'>"
@@ -1407,66 +1375,9 @@ def _build_live_game_card_html(game: dict) -> str:
         "</div>"
         f"<div class='lgc-detail'>{detail_text}</div>"
         "</div>"
-        f"{meta_block}"
         "</div>"
         f"{prob_section}"
-        "</div>"
-    )
-
-
-def _build_market_cell(label: str, probability: float) -> str:
-    """Return one market outcome: label, probability and fair decimal odds."""
-    percent = f"{probability * 100.0:.0f}%"
-    odds = f"{1.0 / probability:.2f}" if probability >= 0.01 else "—"
-    return (
-        "<div class='lgc-market'>"
-        f"<span class='lgc-market__label'>{escape(label)}</span>"
-        f"<span class='lgc-market__pct'>{percent}</span>"
-        f"<span class='lgc-market__odds'>{odds}</span>"
-        "</div>"
-    )
-
-
-def _build_game_markets_markup(markets: object, away_name: str, home_name: str, home_is_favorite: bool) -> str:
-    """Build the 60-minute result and puck-line block for a prediction card popover.
-
-    Outcomes run away, draw, home to match the card's left-to-right layout. The puck
-    line is quoted the usual way: the moneyline favourite at -1.5, the underdog at +1.5.
-
-    Args:
-        markets: ``markets`` from ``get_game_win_probabilities``, or ``None``.
-        away_name: Away team short name.
-        home_name: Home team short name.
-        home_is_favorite: Whether the home side is the moneyline favourite.
-
-    Returns:
-        HTML, or an empty string when there are no markets.
-    """
-    if not isinstance(markets, dict):
-        return ""
-    regulation = markets.get("regulation") or {}
-    puck_line = markets.get("puck_line") or {}
-    try:
-        away_win = float(regulation["away"])
-        draw = float(regulation["draw"])
-        home_win = float(regulation["home"])
-        favorite_minus = float(puck_line["home_minus_1_5"] if home_is_favorite else puck_line["away_minus_1_5"])
-    except (KeyError, TypeError, ValueError):
-        return ""
-    favorite, underdog = (home_name, away_name) if home_is_favorite else (away_name, home_name)
-    return (
-        "<div class='lgc-markets'>"
-        "<div class='lgc-markets__title'>60-minute result</div>"
-        "<div class='lgc-markets__row lgc-markets__row--three'>"
-        f"{_build_market_cell(away_name, away_win)}"
-        f"{_build_market_cell('Draw', draw)}"
-        f"{_build_market_cell(home_name, home_win)}"
-        "</div>"
-        "<div class='lgc-markets__title'>Puck line</div>"
-        "<div class='lgc-markets__row'>"
-        f"{_build_market_cell(f'{favorite} −1.5', favorite_minus)}"
-        f"{_build_market_cell(f'{underdog} +1.5', 1.0 - favorite_minus)}"
-        "</div>"
+        f"<div class='lgc-footer'>{footer_note_markup}<span class='lgc-footer__hint'>{footer_text}</span></div>"
         "</div>"
     )
 
@@ -1524,7 +1435,7 @@ def _build_live_game_card_link_html(game: dict, share_params: dict | None = None
     home_abbr = str(game.get("home_abbr", "") or "").strip().upper()
     away_name = str(game.get("away_name", "") or game.get("away_abbr", "") or "").strip()
     home_name = str(game.get("home_name", "") or game.get("home_abbr", "") or "").strip()
-    title = escape(f"Open matchup history for {away_name} at {home_name}", quote=True)
+    title = escape(f"Open odds and matchup history for {away_name} at {home_name}", quote=True)
     matchup_value = escape(f"{away_abbr},{home_abbr}", quote=True)
     # Deliberately no href: the overlay spans the whole card, so a click the bridge
     # missed used to navigate the document and restart the session. role/tabindex keep
@@ -1628,7 +1539,7 @@ def _render_live_games_tab(share_params: dict | None = None) -> None:
     track_record_markup = _build_track_record_markup(get_track_record())
     if track_record_markup:
         st.markdown(track_record_markup, unsafe_allow_html=True)
-    upcoming_games = get_upcoming_games(limit=_PREDICTIONS_PANEL_MATCH_LIMIT)
+    upcoming_games = get_upcoming_games(limit=PREDICTIONS_PANEL_MATCH_LIMIT)
     if not upcoming_games:
         st.info("No upcoming NHL games found right now.")
         return

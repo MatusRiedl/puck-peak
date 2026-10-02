@@ -105,6 +105,10 @@ _LEDGER_CAPTURE_HOURS = 36
 """Games starting within this window get their prediction logged (and refreshed until puck drop)."""
 _PARTNER_ODDS_COUNTRIES = ("CA", "US", "SE", "FI", "CZ")
 """NHL.com betting-partner feeds read for the market benchmark (free; no key, no payment)."""
+PREDICTIONS_PANEL_MATCH_LIMIT = 8
+"""Games in the predictions rail. Cold loads above this trigger more NHL API rate-limit
+fallbacks, which surface as "Estimate unavailable." cards near the bottom of the list. The
+matchup modal asks for the same limit so it reads the rail's cached call."""
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +233,33 @@ def get_upcoming_games(limit: int = 6, days_ahead: int = 60) -> list[dict]:
         return trimmed_games
     except Exception:
         return []
+
+
+def find_upcoming_game(away_abbr: str, home_abbr: str) -> dict | None:
+    """Return the soonest game in the predictions rail for one away/home pair.
+
+    Reads the same cached ``get_upcoming_games`` call as the rail, so the matchup modal
+    shows exactly the card's numbers and costs no request.
+
+    Args:
+        away_abbr: Away team abbreviation.
+        home_abbr: Home team abbreviation.
+
+    Returns:
+        The upcoming-game dict with its ``pregame_win_prob``, or ``None`` when that
+        pair is not in the rail.
+    """
+    clean_away_abbr = _canonical_team_abbr(away_abbr)
+    clean_home_abbr = _canonical_team_abbr(home_abbr)
+    if not clean_away_abbr or not clean_home_abbr:
+        return None
+    for game in get_upcoming_games(limit=PREDICTIONS_PANEL_MATCH_LIMIT):
+        if (
+            _canonical_team_abbr(game.get("away_abbr")) == clean_away_abbr
+            and _canonical_team_abbr(game.get("home_abbr")) == clean_home_abbr
+        ):
+            return game
+    return None
 
 
 @st.cache_data(ttl=300)

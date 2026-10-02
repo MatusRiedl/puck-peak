@@ -120,6 +120,8 @@ class MatchupCardTests(unittest.TestCase):
         self.assertIn('Home', html)
         self.assertIn('MIN', html)
         self.assertIn('CBJ', html)
+        # The phone-shrinking hooks belong to the compact history layout only.
+        self.assertNotIn('mh-card', html)
 
     def test_matchup_history_card_uses_abbreviations_and_compact_details(self):
         """Keep history cards compact with abbreviations, year suffixes, and OT/SO context."""
@@ -149,6 +151,11 @@ class MatchupCardTests(unittest.TestCase):
         self.assertIn('OT', html)
         self.assertIn("Fri 16 Jan &#x27;26, 03:30 CET", html)
         self.assertIn('flex-wrap:nowrap', html)
+        # In a phone-width modal the 22px team code used to wrap one letter per line.
+        # It must not wrap, and every part carries a hook the stylesheet shrinks.
+        self.assertIn("<div class='mh-card__abbr' style='font-size:22px;font-weight:800;line-height:1.0;white-space:nowrap;'>TOR</div>", html)
+        for hook in ("class='mh-card'", "mh-card__row", "mh-card__team", "mh-card__logo", "mh-card__side", "mh-card__scores", "mh-card__score'", "mh-card__at"):
+            self.assertIn(hook, html)
 
     def test_matchup_history_summary_counts_wins_for_each_team(self):
         """Summarize the displayed history so users do not need to count wins manually."""
@@ -233,6 +240,10 @@ class MatchupCardTests(unittest.TestCase):
         ]
 
         with patch.object(dialog, "get_matchup_history", return_value=history_games), patch.object(
+            dialog,
+            "find_upcoming_game",
+            return_value=None,
+        ), patch.object(
             dialog.st,
             "markdown",
         ) as mock_markdown, patch.object(
@@ -248,9 +259,12 @@ class MatchupCardTests(unittest.TestCase):
         header = markdown_calls[0]
         self.assertIn("EDM", header)
         self.assertIn("DAL", header)
+        self.assertIn("Head-to-head", header)
         self.assertIn("In the last 2 matchups", header)
         self.assertIn("EDM won 1", header)
         self.assertIn("DAL won 1", header)
+        # The pair is not in the predictions rail, so there are no odds to show.
+        self.assertNotIn("matchup-odds", header)
 
         # One card per prior meeting, each naming its venue.
         body = "".join(markdown_calls[1:])
@@ -261,6 +275,10 @@ class MatchupCardTests(unittest.TestCase):
     def test_matchup_history_dialog_shows_empty_state_when_no_games_exist(self):
         """Show a friendly fallback when no completed meetings are available."""
         with patch.object(dialog, "get_matchup_history", return_value=[]), patch.object(
+            dialog,
+            "find_upcoming_game",
+            return_value=None,
+        ), patch.object(
             dialog.st,
             "markdown",
         ), patch.object(
@@ -270,6 +288,136 @@ class MatchupCardTests(unittest.TestCase):
             dialog.show_matchup_history.__wrapped__("EDM", "DAL", 10)
 
         mock_info.assert_called_once_with("No completed matchup history available right now.")
+
+    @staticmethod
+    def _upcoming_game(**probability_overrides) -> dict:
+        """One predictions-rail game with all three markets priced."""
+        probability = {
+            "away_pct": 38,
+            "home_pct": 62,
+            "home_win_prob": 0.62,
+            "away_win_prob": 0.38,
+            "model_label": "Model: TOR edge from team rating.",
+            "away_back_to_back": True,
+            "home_back_to_back": False,
+            "early_season": True,
+            "markets": {
+                "regulation": {"away": 0.29, "draw": 0.22, "home": 0.49},
+                "puck_line": {"home_minus_1_5": 0.25, "away_minus_1_5": 0.12},
+                "expected_total": 6.3,
+            },
+        }
+        probability.update(probability_overrides)
+        return {
+            "away_abbr": "DET",
+            "away_name": "Detroit Red Wings",
+            "home_abbr": "TOR",
+            "home_name": "Toronto Maple Leafs",
+            "start_label_cest": "Tue 10 Mar, 01:00 CET",
+            "venue": "Scotiabank Arena",
+            "game_type": 2,
+            "pregame_win_prob": probability,
+        }
+
+    @staticmethod
+    def _cell(label: str, percent: str, odds: str) -> str:
+        """Expected markup of one odds cell."""
+        return (
+            f"<span class='matchup-odds__label'>{label}</span>"
+            f"<span class='matchup-odds__pct'>{percent}</span>"
+            f"<span class='matchup-odds__odds'>{odds}</span>"
+        )
+
+    def test_matchup_prediction_markup_explains_all_three_markets(self):
+        """Win, 60-minute result and puck line each get cells and one plain sentence.
+
+        Outcomes run away / draw / home, the favourite takes -1.5, every cell shows the
+        probability with its fair decimal odds, and totals never appear (they failed
+        their backtest).
+        """
+        markup = dialog._build_matchup_prediction_markup(self._upcoming_game())
+
+        self.assertIn("To win", markup)
+        self.assertIn("Overtime and shootout included.", markup)
+        self.assertIn(self._cell("Red Wings", "38%", "2.63"), markup)
+        self.assertIn(self._cell("Leafs", "62%", "1.61"), markup)
+
+        self.assertIn("After 60 minutes", markup)
+        self.assertIn("A tie counts as Draw", markup)
+        self.assertIn(self._cell("Red Wings", "29%", "3.45"), markup)
+        self.assertIn(self._cell("Draw", "22%", "4.55"), markup)
+        self.assertIn(self._cell("Leafs", "49%", "2.04"), markup)
+
+        self.assertIn("Puck line", markup)
+        self.assertIn("Leafs −1.5 needs a win by 2 or more. Red Wings +1.5 covers with a win or a one-goal loss.", markup)
+        self.assertIn(self._cell("Leafs −1.5", "25%", "4.00"), markup)
+        self.assertIn(self._cell("Red Wings +1.5", "75%", "1.33"), markup)
+
+        # Fair odds must never read as a betting line.
+        self.assertIn("no bookmaker margin", markup)
+        self.assertIn("Model estimate, not a betting line.", markup)
+        self.assertIn(
+            "Model: TOR edge from team rating. Back-to-back: Red Wings. Early season: ratings still lean on last season.",
+            markup,
+        )
+        for totals_word in ("Under", "Total", "6.3"):
+            self.assertNotIn(totals_word, markup)
+
+    def test_matchup_prediction_markup_gives_the_away_favourite_the_minus_side(self):
+        """The puck line follows the moneyline favourite, home or away."""
+        markup = dialog._build_matchup_prediction_markup(
+            self._upcoming_game(away_pct=60, home_pct=40, home_win_prob=0.40, away_back_to_back=False, early_season=False)
+        )
+
+        self.assertIn(self._cell("Red Wings −1.5", "12%", "8.33"), markup)
+        self.assertIn(self._cell("Leafs +1.5", "88%", "1.14"), markup)
+        self.assertNotIn("Back-to-back", markup)
+        self.assertNotIn("Early season", markup)
+
+    def test_matchup_prediction_notes_do_not_repeat_the_back_to_back(self):
+        """The driver line already names the one tired team; both tired teams still get listed."""
+        driver = "Model: DET on the second night of a back-to-back."
+        one_tired = dialog._build_matchup_prediction_markup(self._upcoming_game(model_label=driver, early_season=False))
+        both_tired = dialog._build_matchup_prediction_markup(
+            self._upcoming_game(model_label=driver, home_back_to_back=True, early_season=False)
+        )
+
+        self.assertIn(f"<div class='matchup-odds__notes'>{driver}</div>", one_tired)
+        self.assertIn(f"{driver} Back-to-back: Red Wings &amp; Leafs.", both_tired)
+
+    def test_matchup_prediction_markup_degrades_without_markets_or_prediction(self):
+        """No goal model leaves the win row alone; no prediction leaves nothing."""
+        win_only = dialog._build_matchup_prediction_markup(self._upcoming_game(markets=None))
+
+        self.assertIn(self._cell("Leafs", "62%", "1.61"), win_only)
+        self.assertNotIn("After 60 minutes", win_only)
+        self.assertNotIn("Puck line", win_only)
+
+        exhibition = self._upcoming_game()
+        exhibition["pregame_win_prob"] = None
+        self.assertEqual(dialog._build_matchup_prediction_markup(exhibition), "")
+        self.assertEqual(dialog._build_matchup_prediction_markup(None), "")
+
+    def test_matchup_dialog_puts_the_odds_above_the_head_to_head_list(self):
+        """An upcoming game opens with when/where and the odds, then the history."""
+        with patch.object(dialog, "get_matchup_history", return_value=[]), patch.object(
+            dialog,
+            "find_upcoming_game",
+            return_value=self._upcoming_game(),
+        ) as mock_find, patch.object(
+            dialog.st,
+            "markdown",
+        ) as mock_markdown, patch.object(
+            dialog.st,
+            "info",
+        ):
+            dialog.show_matchup_history.__wrapped__("det", "TOR", 10)
+
+        mock_find.assert_called_once_with("DET", "TOR")
+        header = str(mock_markdown.call_args_list[0].args[0])
+        self.assertIn("Tue 10 Mar, 01:00 CET • Scotiabank Arena", header)
+        self.assertIn("matchup-odds", header)
+        self.assertLess(header.index("matchup-odds"), header.index("Head-to-head"))
 
 
 class IdentityDialogTests(unittest.TestCase):

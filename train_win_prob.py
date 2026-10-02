@@ -13,6 +13,10 @@ Run ``python train_win_prob.py``. It fetches every regular season and playoff si
 5. Backtests playoff series probabilities (report only; the sample is small).
 
 The artifact is written only if both gates pass. Exit code 1 means a gate failed.
+
+``--phase2-report`` and ``--ledger-report [path]`` are report-only and never write the
+artifact. The second one reads the prediction ledger and prints how the published
+predictions compare with the betting market on the same games.
 """
 
 from __future__ import annotations
@@ -55,6 +59,7 @@ from nhl.goal_model import (
     solve_home_share,
     validate_goal_model,
 )
+from nhl.ledger import MARKET_DECISION_GAMES, ledger_path, load_ledger, market_comparison, track_record
 from nhl.season_sim import series_win_probability, simulate_season
 from nhl.team_ratings import (
     DEFAULT_RATING_PARAMS,
@@ -1329,5 +1334,70 @@ def phase2_report() -> int:
     return 0 if passed else 1
 
 
+def ledger_report(path: str | None = None) -> int:
+    """Print how the published predictions compare with the betting market so far.
+
+    Report only; the artifact is never touched. The ledger lives on the production
+    volume, so copy it down first (readme.txt, SECTION 10A). The market's edge over
+    the model, and the blend that would have scored best, are only worth acting on once
+    ``MARKET_DECISION_GAMES`` games are in: below that the gap is mostly noise.
+
+    Args:
+        path: Ledger SQLite file. Defaults to ``PUCKPEAK_DATA_DIR`` or the repo ``.data`` folder.
+
+    Returns:
+        0. A report has no gate.
+    """
+    target = Path(path) if path else ledger_path()
+    predictions, market_odds = load_ledger(target)
+    if predictions.empty:
+        print(f"No predictions in {target}. Copy the ledger from production first (readme.txt, SECTION 10A).")
+        return 0
+
+    print(f"Prediction ledger: {target}")
+    for season in sorted(int(value) for value in predictions["season_year"].dropna().unique()):
+        record = track_record(predictions, market_odds, season)
+        span = f"{season}-{str(season + 1)[2:]}"
+        print(f"\n{span}: {record['logged']} predictions logged, {record['games']} graded")
+        if not record["games"]:
+            continue
+        print(
+            f"  model: log loss {record['log_loss']:.4f} (coin flip {record['coin_flip_log_loss']:.4f}), "
+            f"{record['accuracy']:.1%} winners picked"
+        )
+        comparison = market_comparison(predictions, market_odds, season)
+        if not comparison["games"]:
+            print("  market: no graded game has a pregame market price yet")
+            continue
+        gap = comparison["model_minus_market"]
+        error = comparison["standard_error"]
+        error_text = f"standard error {error:.4f}" if error is not None else "one game, no standard error"
+        print(f"  market: {comparison['games']} of those games have a pregame market price")
+        print(
+            f"    log loss on those games: model {comparison['model_log_loss']:.4f}, market {comparison['market_log_loss']:.4f} "
+            f"-> model is {abs(gap):.4f} {'worse' if gap > 0 else 'better'} ({error_text})"
+        )
+        print(
+            f"    winners picked: model {comparison['model_accuracy']:.1%}, market {comparison['market_accuracy']:.1%}; "
+            f"model and market differ by {comparison['mean_abs_gap'] * 100:.1f} points on average (largest {comparison['max_abs_gap'] * 100:.1f})"
+        )
+        print(
+            f"    best mix fitted on these same games: {comparison['best_market_weight']:.0%} market / "
+            f"{1 - comparison['best_market_weight']:.0%} model -> log loss {comparison['blend_log_loss']:.4f}"
+        )
+        if comparison["games"] < MARKET_DECISION_GAMES:
+            print(f"    {comparison['games']} games is too few to act on; wait for {MARKET_DECISION_GAMES}.")
+    return 0
+
+
+def _ledger_report_path(arguments: list[str]) -> str | None:
+    """Return the optional path that follows ``--ledger-report`` on the command line."""
+    following = arguments[arguments.index("--ledger-report") + 1:]
+    return following[0] if following and not following[0].startswith("--") else None
+
+
 if __name__ == "__main__":
-    sys.exit(phase2_report() if "--phase2-report" in sys.argv[1:] else main())
+    arguments = sys.argv[1:]
+    if "--ledger-report" in arguments:
+        sys.exit(ledger_report(_ledger_report_path(arguments)))
+    sys.exit(phase2_report() if "--phase2-report" in arguments else main())

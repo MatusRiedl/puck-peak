@@ -326,17 +326,42 @@ class StylesTests(unittest.TestCase):
         self.assertIn('.comparison-card-shell--clickable .comparison-player-card {', styles_text)
         self.assertIn('transform: none !important;', styles_text)
 
-    def test_chart_hover_labels_keep_shadow_effect_while_predictions_use_popovers(self):
-        """Keep the deliberate chart hover shadow and the rail's soft meta popovers."""
+    def test_chart_hover_labels_keep_shadow_effect_while_prediction_odds_live_in_the_modal(self):
+        """Keep the deliberate chart hover shadow; prediction cards have no hover popover.
+
+        The old popover sat inside its card's stacking context, so the cards below it
+        painted over it and it read as a faded, unreadable box on desktop. The odds now
+        live in the matchup modal, and the card only carries a footer hint.
+        """
         repo_root = get_favicon_path().parent.parent
         chart_text = (repo_root / "nhl" / "chart.py").read_text(encoding="utf-8")
         styles_text = get_app_css_text()
 
         self.assertIn('.js-plotly-plot .hoverlayer .hovertext', chart_text)
         self.assertIn('drop-shadow(0 6px 18px rgba(0, 0, 0, 0.62))', chart_text)
-        self.assertIn('.lgc-meta-popover {', styles_text)
-        self.assertIn('backdrop-filter: blur(10px);', styles_text)
-        self.assertIn('transition: opacity 140ms ease, visibility 140ms ease, transform 140ms ease;', styles_text)
+        self.assertNotIn('lgc-meta', styles_text)
+        self.assertNotIn('lgc-market', styles_text)
+        self.assertIn('.lgc-footer {', styles_text)
+        self.assertIn('.live-game-card-shell:hover .lgc-footer__hint,', styles_text)
+        self.assertIn('.matchup-odds {', styles_text)
+        self.assertIn('.matchup-odds__row--three {', styles_text)
+        self.assertIn('.matchup-odds__cell {', styles_text)
+
+    def test_matchup_history_cards_shrink_on_phones_instead_of_wrapping_team_codes(self):
+        """Keep the head-to-head cards readable in a phone-width modal.
+
+        The cards are inline-styled, so the phone rules need ``!important``. Without
+        them a 390px modal left about 30px for a 22px team code, which wrapped one
+        letter per line.
+        """
+        styles_text = get_app_css_text()
+
+        self.assertIn('.mh-card__abbr,\n.mh-card__side {\n    white-space: nowrap;\n}', styles_text.replace('\r\n', '\n'))
+        phone_rules = styles_text.replace('\r\n', '\n').split('.mh-card__side {', 1)[1].split('@media (max-width: 350px)', 1)[0]
+        self.assertIn('@media (max-width: 480px) {', phone_rules)
+        self.assertIn('.mh-card__logo {\n        height: 28px !important;', phone_rules)
+        self.assertIn('.mh-card__abbr {\n        font-size: 18px !important;', phone_rules)
+        self.assertIn('.mh-card__score {\n        font-size: 26px !important;', phone_rules)
 
     def test_sidebar_help_button_and_app_guide_dialog_exist(self):
         """Keep the sidebar guide affordance and modal explanation wired in.

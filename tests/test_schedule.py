@@ -56,6 +56,26 @@ class ScheduleTests(unittest.TestCase):
             "Tue 07 Apr, 19:30 CEST",
         )
 
+    def test_find_upcoming_game_returns_the_soonest_match_for_the_pair(self):
+        """The matchup modal reads the rail's own cached list and takes the first match.
+
+        Away/home order matters: the return leg of a home-and-home is a different game.
+        """
+        rail = [
+            {"game_id": 1, "away_abbr": "BOS", "home_abbr": "NYR"},
+            {"game_id": 2, "away_abbr": "EDM", "home_abbr": "DAL"},
+            {"game_id": 3, "away_abbr": "EDM", "home_abbr": "DAL"},
+            {"game_id": 4, "away_abbr": "DAL", "home_abbr": "EDM"},
+        ]
+        with patch.object(schedule, "get_upcoming_games", return_value=rail) as mock_upcoming:
+            self.assertEqual(schedule.find_upcoming_game("edm", "DAL")["game_id"], 2)
+            self.assertEqual(schedule.find_upcoming_game("DAL", "EDM")["game_id"], 4)
+            self.assertIsNone(schedule.find_upcoming_game("TOR", "MTL"))
+            self.assertIsNone(schedule.find_upcoming_game("", "DAL"))
+
+        # Same limit as the rail, so both read one cached call.
+        mock_upcoming.assert_called_with(limit=schedule.PREDICTIONS_PANEL_MATCH_LIMIT)
+
     def test_extract_upcoming_games_filters_invalid_rows_and_sorts_by_start(self):
         """Keep future preseason, regular-season and playoff games, sorted by start.
 

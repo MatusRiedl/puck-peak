@@ -33,6 +33,12 @@ DATA_DIR_ENV = "PUCKPEAK_DATA_DIR"
 LEDGER_FILENAME = "prediction_ledger.sqlite3"
 MIN_GRADED_GAMES_FOR_RECORD = 20
 """Below this many graded games the app says the live record is still building."""
+MARKET_STALE_HOURS = 24.0
+"""A partner price last updated longer than this before puck drop is not a near-closing line."""
+MARKET_DECISION_GAMES = 300
+"""Graded games with a market price needed before the model-vs-market gap means anything."""
+BLEND_WEIGHT_STEP = 0.05
+"""Grid step for the market share tried by ``market_comparison``."""
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS predictions (
@@ -345,8 +351,35 @@ def parse_partner_odds(payload: object) -> list[dict]:
     return rows
 
 
+def is_stale_partner_row(feed_updated_utc: object, start_time_utc: object) -> bool:
+    """Tell whether a partner's price is too old to count as a near-closing line.
+
+    A partner feed can keep listing a game while its prices have not moved for days
+    (seen live: a feed last updated a week before the games it listed). Averaging
+    such a price into the consensus makes the market look worse than it is, which
+    flatters the model in the public comparison.
+
+    Args:
+        feed_updated_utc: The partner feed's ``lastUpdatedUTC`` at capture time.
+        start_time_utc: The game's scheduled start.
+
+    Returns:
+        True when the feed was last updated more than ``MARKET_STALE_HOURS`` before the
+        start. A row without two parseable timestamps is kept, since there is nothing
+        to judge it by.
+    """
+    updated = _parse_utc(feed_updated_utc)
+    start = _parse_utc(start_time_utc)
+    if updated is None or start is None:
+        return False
+    return (start - updated).total_seconds() > MARKET_STALE_HOURS * 3600.0
+
+
 def market_consensus(market_odds: pd.DataFrame) -> pd.DataFrame:
     """Average every partner's margin-free probabilities per game.
+
+    Stale partner rows (see ``is_stale_partner_row``) are left out. A game whose every
+    row is stale has no consensus.
 
     Args:
         market_odds: ``market_odds`` table rows.
@@ -360,6 +393,8 @@ def market_consensus(market_odds: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=columns)
     rows = []
     for row in market_odds.itertuples(index=False):
+        if is_stale_partner_row(getattr(row, "feed_updated_utc", None), getattr(row, "start_time_utc", None)):
+            continue
         moneyline = remove_margin(row.home_moneyline, row.away_moneyline)
         regulation = remove_margin(row.home_regulation, row.draw_regulation, row.away_regulation)
         puck = remove_margin(row.home_puck_line, row.away_puck_line)
@@ -374,6 +409,8 @@ def market_consensus(market_odds: pd.DataFrame) -> pd.DataFrame:
             "market_regulation_away": regulation[2] if regulation else np.nan,
             "market_home_minus_1_5": home_minus if home_minus is not None else np.nan,
         })
+    if not rows:
+        return pd.DataFrame(columns=columns)
     frame = pd.DataFrame(rows)
     consensus = frame.groupby("game_id").mean(numeric_only=True).reset_index()
     consensus["market_partners"] = frame.groupby("game_id").size().to_numpy()
@@ -384,11 +421,16 @@ def market_consensus(market_odds: pd.DataFrame) -> pd.DataFrame:
 # Track record
 # ---------------------------------------------------------------------------
 
-def _binary_log_loss(labels: np.ndarray, probabilities: np.ndarray) -> float:
-    """Mean binary log loss."""
+def _binary_log_losses(labels: np.ndarray, probabilities: np.ndarray) -> np.ndarray:
+    """Binary log loss of every game."""
     p = np.clip(np.asarray(probabilities, dtype=float), 1e-9, 1 - 1e-9)
     y = np.asarray(labels, dtype=float)
-    return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+    return -(y * np.log(p) + (1 - y) * np.log(1 - p))
+
+
+def _binary_log_loss(labels: np.ndarray, probabilities: np.ndarray) -> float:
+    """Mean binary log loss."""
+    return float(np.mean(_binary_log_losses(labels, probabilities)))
 
 
 def track_record(predictions: pd.DataFrame, market_odds: pd.DataFrame | None = None, season_year: int | None = None) -> dict:
@@ -446,6 +488,69 @@ def track_record(predictions: pd.DataFrame, market_odds: pd.DataFrame | None = N
             record["model_log_loss_on_market_games"] = _binary_log_loss(joined_labels, joined["home_win_prob"].to_numpy())
             record["market_accuracy"] = float(np.mean((joined["market_home_win"].to_numpy() >= 0.5) == (joined_labels == 1)))
     return record
+
+
+def market_comparison(predictions: pd.DataFrame, market_odds: pd.DataFrame | None = None, season_year: int | None = None) -> dict:
+    """Compare the model with the betting market on graded games that have a market price.
+
+    This is the evidence for whether market prices should ever be blended into the
+    published number. Every figure uses the same games. The blend weight is fitted on
+    those games, so it is an in-sample figure: below ``MARKET_DECISION_GAMES`` games it
+    shows a direction, not a result.
+
+    Args:
+        predictions: ``predictions`` table rows.
+        market_odds: ``market_odds`` table rows.
+        season_year: Only games of this season, when given.
+
+    Returns:
+        ``games`` (0 when there is nothing to compare) and, otherwise:
+        ``model_log_loss`` and ``market_log_loss``; ``model_minus_market`` (positive
+        means the market was better) with its paired ``standard_error`` (``None`` for
+        one game); ``mean_abs_gap`` and ``max_abs_gap`` between the two home-win
+        probabilities; ``model_accuracy`` and ``market_accuracy``; ``best_market_weight``
+        (0 = model only, 1 = market only, mixed on the logit scale) and ``blend_log_loss``.
+    """
+    if predictions is None or predictions.empty or market_odds is None or market_odds.empty:
+        return {"games": 0}
+    graded = predictions[predictions["graded_utc"].notna()]
+    if season_year is not None:
+        graded = graded[graded["season_year"].eq(int(season_year))]
+    joined = graded.merge(market_consensus(market_odds), on="game_id", how="inner").dropna(subset=["market_home_win"])
+    if joined.empty:
+        return {"games": 0}
+
+    labels = joined["home_win"].astype(int).to_numpy()
+    model = np.clip(joined["home_win_prob"].astype(float).to_numpy(), 1e-6, 1 - 1e-6)
+    market = np.clip(joined["market_home_win"].astype(float).to_numpy(), 1e-6, 1 - 1e-6)
+    model_losses = _binary_log_losses(labels, model)
+    market_losses = _binary_log_losses(labels, market)
+    difference = model_losses - market_losses
+    games = int(len(labels))
+
+    model_logit = np.log(model / (1 - model))
+    market_logit = np.log(market / (1 - market))
+    best_weight, best_loss = 0.0, float(model_losses.mean())
+    for weight in np.arange(BLEND_WEIGHT_STEP, 1.0 + BLEND_WEIGHT_STEP / 2.0, BLEND_WEIGHT_STEP):
+        blended = 1.0 / (1.0 + np.exp(-((1.0 - weight) * model_logit + weight * market_logit)))
+        loss = _binary_log_loss(labels, blended)
+        if loss < best_loss:
+            best_weight, best_loss = float(round(weight, 2)), loss
+
+    gap = np.abs(model - market)
+    return {
+        "games": games,
+        "model_log_loss": float(model_losses.mean()),
+        "market_log_loss": float(market_losses.mean()),
+        "model_minus_market": float(difference.mean()),
+        "standard_error": float(difference.std(ddof=1) / math.sqrt(games)) if games > 1 else None,
+        "mean_abs_gap": float(gap.mean()),
+        "max_abs_gap": float(gap.max()),
+        "model_accuracy": float(np.mean((model >= 0.5) == (labels == 1))),
+        "market_accuracy": float(np.mean((market >= 0.5) == (labels == 1))),
+        "best_market_weight": best_weight,
+        "blend_log_loss": best_loss,
+    }
 
 
 def prediction_row(game: dict, probability: dict, model_version: str) -> dict:

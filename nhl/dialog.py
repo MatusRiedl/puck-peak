@@ -14,7 +14,7 @@ from nhl.data_loaders import (
 )
 from nhl.era import get_era_multiplier
 from nhl.rarity import collapse_player_snapshot_rows, get_age_rarity_summary
-from nhl.schedule import get_game_details, get_matchup_history
+from nhl.schedule import find_upcoming_game, get_game_details, get_matchup_history
 
 
 BASELINE_LABEL_TO_KEY = {
@@ -469,7 +469,27 @@ def _build_matchup_card_html_legacy_v2(game: dict, compact_layout: bool = False)
     )
 
 def _build_matchup_card_html(game: dict, compact_layout: bool = False) -> str:
-    """Render one matchup card, with an optional tighter history layout."""
+    """Render one matchup card, with an optional tighter history layout.
+
+    The card is inline-styled. In the compact history layout its parts also carry
+    ``mh-card`` class hooks, so the stylesheet can shrink logos, codes and scores on
+    phones: a 390px-wide modal otherwise leaves too little room for the team code and it
+    wraps one letter per line.
+
+    Args:
+        game: Matchup dict with team abbreviations, names, scores and detail labels.
+        compact_layout: Use the stacked head-to-head layout of the matchup modal.
+
+    Returns:
+        HTML for one card.
+    """
+
+    def _hook(name: str = '') -> str:
+        """Return the class attribute for one part of a compact history card."""
+        if not compact_layout:
+            return ''
+        return f" class='mh-card__{name}'" if name else " class='mh-card'"
+
     away_abbr_raw = str(game.get('away_abbr', '') or '')
     home_abbr_raw = str(game.get('home_abbr', '') or '')
     away_name_raw = str(game.get('away_name', '') or away_abbr_raw)
@@ -491,7 +511,7 @@ def _build_matchup_card_html(game: dict, compact_layout: bool = False) -> str:
         direction = 'row-reverse' if align == 'right' else 'row'
         team_label = abbr or short_name
         if compact_layout:
-            name_html = f"<div style='font-size:22px;font-weight:800;line-height:1.0;'>{team_label}</div>"
+            name_html = f"<div{_hook('abbr')} style='font-size:22px;font-weight:800;line-height:1.0;white-space:nowrap;'>{team_label}</div>"
         else:
             name_html = (
                 f"<div style='display:flex;align-items:baseline;gap:7px;justify-content:{'flex-end' if align == 'right' else 'flex-start'};white-space:nowrap;'>"
@@ -500,10 +520,10 @@ def _build_matchup_card_html(game: dict, compact_layout: bool = False) -> str:
                 "</div>"
             )
         return (
-            f"<div style='display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 0;flex-direction:{direction};overflow:hidden;'>"
-            f"<img src='{logo}' height='38'>"
+            f"<div{_hook('team')} style='display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 0;flex-direction:{direction};overflow:hidden;'>"
+            f"<img{_hook('logo')} src='{logo}' height='38'>"
             f"<div style='text-align:{text_align};min-width:0;'>"
-            f"<div style='font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#8b949e;font-weight:700;'>{side_label}</div>"
+            f"<div{_hook('side')} style='font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#8b949e;font-weight:700;'>{side_label}</div>"
             f"{name_html}"
             "</div>"
             "</div>"
@@ -512,7 +532,7 @@ def _build_matchup_card_html(game: dict, compact_layout: bool = False) -> str:
     def _score_html(value, did_win: bool) -> str:
         """Return styled score markup with winner emphasis."""
         color = '#ffffff' if did_win else '#8b949e'
-        return f"<div style='font-size:32px;font-weight:800;color:{color};line-height:1.0;'>{value if value is not None else '-'}</div>"
+        return f"<div{_hook('score')} style='font-size:32px;font-weight:800;color:{color};line-height:1.0;'>{value if value is not None else '-'}</div>"
 
     if compact_layout:
         detail_bits = [
@@ -529,10 +549,10 @@ def _build_matchup_card_html(game: dict, compact_layout: bool = False) -> str:
     detail_html = escape(' | '.join(detail_bits)) if detail_bits else 'Matchup details unavailable'
 
     return (
-        "<div style='background:#231f20;border:1px solid #343434;border-radius:14px;padding:14px 16px;margin:10px 0 12px 0;'>"
-        "<div style='display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:nowrap;'>"
+        f"<div{_hook()} style='background:#231f20;border:1px solid #343434;border-radius:14px;padding:14px 16px;margin:10px 0 12px 0;'>"
+        f"<div{_hook('row')} style='display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:nowrap;'>"
         f"{_team_block(away_abbr, away_short_name, away_logo, 'Away')}"
-        f"<div style='display:flex;align-items:center;gap:12px;flex:0 0 auto;padding:0 4px;'>{_score_html(away_score, away_won)}<div style='font-size:18px;color:#8b949e;font-weight:700;'>@</div>{_score_html(home_score, home_won)}</div>"
+        f"<div{_hook('scores')} style='display:flex;align-items:center;gap:12px;flex:0 0 auto;padding:0 4px;'>{_score_html(away_score, away_won)}<div{_hook('at')} style='font-size:18px;color:#8b949e;font-weight:700;'>@</div>{_score_html(home_score, home_won)}</div>"
         f"{_team_block(home_abbr, home_short_name, home_logo, 'Home', align='right')}"
         "</div>"
         f"<div style='margin-top:10px;font-size:13px;color:#b7bcc2;'>{detail_html}</div>"
@@ -1507,6 +1527,147 @@ def show_team_identity_details(team_abbr: str) -> None:
         st.info("Team details unavailable right now.")
 
 
+def _build_market_cell(label: str, probability: float, percent: int | None = None) -> str:
+    """Return one market outcome: label, probability and fair decimal odds.
+
+    Args:
+        label: Outcome label.
+        probability: Model probability, 0 to 1.
+        percent: Whole-number percentage to print instead of rounding ``probability``,
+            so the modal repeats the prediction card's figure exactly.
+
+    Returns:
+        HTML for one cell.
+    """
+    percent_text = f"{percent}%" if percent is not None else f"{probability * 100.0:.0f}%"
+    odds = f"{1.0 / probability:.2f}" if probability >= 0.01 else "—"
+    return (
+        "<div class='matchup-odds__cell'>"
+        f"<span class='matchup-odds__label'>{escape(label)}</span>"
+        f"<span class='matchup-odds__pct'>{percent_text}</span>"
+        f"<span class='matchup-odds__odds'>{odds}</span>"
+        "</div>"
+    )
+
+
+def _build_game_markets_markup(markets: object, away_name: str, home_name: str, home_is_favorite: bool) -> str:
+    """Build the 60-minute result and puck-line rows of the matchup modal.
+
+    Outcomes run away, draw, home to match the prediction card's left-to-right layout.
+    The puck line is quoted the usual way: the moneyline favourite at -1.5, the underdog
+    at +1.5. Each market carries one plain sentence saying what it means.
+
+    Args:
+        markets: ``markets`` from ``get_game_win_probabilities``, or ``None``.
+        away_name: Away team short name.
+        home_name: Home team short name.
+        home_is_favorite: Whether the home side is the moneyline favourite.
+
+    Returns:
+        HTML, or an empty string when there are no markets.
+    """
+    if not isinstance(markets, dict):
+        return ""
+    regulation = markets.get("regulation") or {}
+    puck_line = markets.get("puck_line") or {}
+    try:
+        away_win = float(regulation["away"])
+        draw = float(regulation["draw"])
+        home_win = float(regulation["home"])
+        favorite_minus = float(puck_line["home_minus_1_5"] if home_is_favorite else puck_line["away_minus_1_5"])
+    except (KeyError, TypeError, ValueError):
+        return ""
+    favorite, underdog = (home_name, away_name) if home_is_favorite else (away_name, home_name)
+    return (
+        "<div class='matchup-odds__title'>After 60 minutes</div>"
+        "<div class='matchup-odds__hint'>Regulation time only. A tie counts as Draw, whatever happens in overtime.</div>"
+        "<div class='matchup-odds__row matchup-odds__row--three'>"
+        f"{_build_market_cell(away_name, away_win)}"
+        f"{_build_market_cell('Draw', draw)}"
+        f"{_build_market_cell(home_name, home_win)}"
+        "</div>"
+        "<div class='matchup-odds__title'>Puck line</div>"
+        "<div class='matchup-odds__hint'>"
+        f"{escape(favorite)} −1.5 needs a win by 2 or more. {escape(underdog)} +1.5 covers with a win or a one-goal loss."
+        "</div>"
+        "<div class='matchup-odds__row'>"
+        f"{_build_market_cell(f'{favorite} −1.5', favorite_minus)}"
+        f"{_build_market_cell(f'{underdog} +1.5', 1.0 - favorite_minus)}"
+        "</div>"
+    )
+
+
+def _build_matchup_prediction_markup(game: dict | None) -> str:
+    """Build the model's odds block shown above the head-to-head list.
+
+    Three markets, each with a one-line explanation: the win probability (overtime and
+    shootout included), the 60-minute result and the puck line. Every cell shows the
+    probability and its fair decimal odds, which carry no bookmaker margin and are not
+    a betting line.
+
+    Args:
+        game: ``schedule.find_upcoming_game`` output, or ``None``.
+
+    Returns:
+        HTML, or an empty string when the game has no prediction (an exhibition, the
+        model being unavailable, or a pair that is not in the predictions rail).
+    """
+    probability = (game or {}).get("pregame_win_prob")
+    if not isinstance(probability, dict):
+        return ""
+    try:
+        away_pct = min(max(int(probability.get("away_pct", 0)), 0), 100)
+        home_pct = min(max(int(probability.get("home_pct", 0)), 0), 100)
+        home_prob = float(probability.get("home_win_prob") or home_pct / 100.0)
+    except (TypeError, ValueError):
+        return ""
+    if not 0.0 < home_prob < 1.0:
+        return ""
+
+    away_abbr = str(game.get("away_abbr", "") or "").strip().upper()
+    home_abbr = str(game.get("home_abbr", "") or "").strip().upper()
+    away_name = _get_team_short_name(away_abbr, str(game.get("away_name", "") or away_abbr))
+    home_name = _get_team_short_name(home_abbr, str(game.get("home_name", "") or home_abbr))
+    markets_markup = _build_game_markets_markup(probability.get("markets"), away_name, home_name, home_pct >= away_pct)
+
+    notes: list[str] = []
+    model_label = str(probability.get("model_label", "") or "").strip()
+    if model_label:
+        notes.append(model_label)
+    tired_teams = [
+        name
+        for name, flag in ((away_name, probability.get("away_back_to_back")), (home_name, probability.get("home_back_to_back")))
+        if flag
+    ]
+    # When the model's own driver line already names the one tired team, saying it
+    # twice is noise. With both teams on a back-to-back the line names only one.
+    label_covers_it = len(tired_teams) == 1 and "back-to-back" in model_label.lower()
+    if tired_teams and not label_covers_it:
+        notes.append(f"Back-to-back: {' & '.join(tired_teams)}.")
+    # Early in a season a team's rating is still mostly last season's. Say so rather
+    # than passing it off as current form.
+    if probability.get("early_season"):
+        notes.append("Early season: ratings still lean on last season.")
+    notes_markup = f"<div class='matchup-odds__notes'>{escape(' '.join(notes))}</div>" if notes else ""
+
+    return (
+        "<div class='matchup-odds'>"
+        "<div class='matchup-odds__title'>To win</div>"
+        "<div class='matchup-odds__hint'>Overtime and shootout included.</div>"
+        "<div class='matchup-odds__row'>"
+        f"{_build_market_cell(away_name, 1.0 - home_prob, away_pct)}"
+        f"{_build_market_cell(home_name, home_prob, home_pct)}"
+        "</div>"
+        f"{markets_markup}"
+        "<div class='matchup-odds__legend'>"
+        "Top number is the model's probability. Bottom number is fair decimal odds "
+        "(1 ÷ probability, no bookmaker margin). Model estimate, not a betting line."
+        "</div>"
+        f"{notes_markup}"
+        "</div>"
+    )
+
+
 def _build_matchup_history_summary(
     away_abbr: str,
     home_abbr: str,
@@ -1557,17 +1718,37 @@ def _build_matchup_history_summary(
     }
 
 
-@st.dialog("Matchup History")
+@st.dialog("Matchup")
 def show_matchup_history(
     away_abbr: str,
     home_abbr: str,
     limit: int = 10,
 ) -> None:
-    """Render the latest head-to-head meetings for one upcoming matchup."""
+    """Render the model's odds for one upcoming matchup, then its latest head-to-head meetings.
+
+    The odds block only appears when the pair is in the predictions rail and has a
+    prediction. A pasted ``?mh=`` link for any other pair shows the history alone.
+
+    Args:
+        away_abbr: Away team abbreviation.
+        home_abbr: Home team abbreviation.
+        limit: Maximum number of past meetings to list.
+    """
     clean_away_abbr = str(away_abbr or "").strip().upper()
     clean_home_abbr = str(home_abbr or "").strip().upper()
     away_color = _get_team_brand_color(clean_away_abbr)
     home_color = _get_team_brand_color(clean_home_abbr)
+
+    upcoming_game = find_upcoming_game(clean_away_abbr, clean_home_abbr)
+    when_html = ""
+    if upcoming_game:
+        when_bits = [str(upcoming_game.get("start_label_cest", "") or "").strip()]
+        if int(upcoming_game.get("game_type", 0) or 0) == 1:
+            when_bits.append("Preseason")
+        when_bits.append(str(upcoming_game.get("venue", "") or "").strip())
+        when_text = " • ".join(bit for bit in when_bits if bit)
+        if when_text:
+            when_html = f"<div class='matchup-when'>{escape(when_text)}</div>"
 
     history_games = get_matchup_history(
         away_abbr=clean_away_abbr,
@@ -1611,7 +1792,11 @@ def show_matchup_history(
             "<span style='color:#8b949e;font-weight:600;'> vs </span>"
             f"<span style='color:{home_color};'>{escape(clean_home_abbr)}</span>"
             "</div>"
-        ) + sub_html,
+        )
+        + when_html
+        + _build_matchup_prediction_markup(upcoming_game)
+        + "<div class='matchup-section-title'>Head-to-head</div>"
+        + sub_html,
         unsafe_allow_html=True,
     )
 

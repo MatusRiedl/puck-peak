@@ -150,13 +150,34 @@ class MarketOddsTests(unittest.TestCase):
 
     def test_consensus_averages_partners_per_game(self):
         """Two partners' fair moneyline probabilities are averaged."""
-        first = ledger.parse_partner_odds(FANDUEL)[0]
+        first = dict(ledger.parse_partner_odds(FANDUEL)[0], feed_updated_utc="2026-09-29T20:30:00Z")
         second = dict(first, partner="Other (USA)", home_moneyline=-150.0, away_moneyline=130.0)
         consensus = ledger.market_consensus(pd.DataFrame([first, second]))
 
         expected = (ledger.remove_margin(-125, 104)[0] + ledger.remove_margin(-150, 130)[0]) / 2
         self.assertAlmostEqual(float(consensus.iloc[0]["market_home_win"]), expected)
         self.assertEqual(int(consensus.iloc[0]["market_partners"]), 2)
+
+    def test_consensus_drops_partner_prices_that_went_stale_before_puck_drop(self):
+        """A feed that stopped updating days earlier is not a near-closing line.
+
+        The fixture is such a feed: last updated 16 days before the game it lists.
+        A partner row with no timestamp is kept, because there is nothing to judge it by.
+        """
+        stale = ledger.parse_partner_odds(FANDUEL)[0]
+        fresh = dict(stale, partner="Fresh (USA)", feed_updated_utc="2026-09-29T20:55:00Z", home_moneyline=-150.0, away_moneyline=130.0)
+        undated = dict(stale, partner="Undated (SWE)", feed_updated_utc="", home_moneyline=1.70, away_moneyline=2.20)
+
+        self.assertTrue(ledger.is_stale_partner_row(stale["feed_updated_utc"], stale["start_time_utc"]))
+        self.assertFalse(ledger.is_stale_partner_row("2026-09-28T21:00:00Z", stale["start_time_utc"]))
+        self.assertFalse(ledger.is_stale_partner_row(None, stale["start_time_utc"]))
+
+        consensus = ledger.market_consensus(pd.DataFrame([stale, fresh, undated]))
+        expected = (ledger.remove_margin(-150, 130)[0] + ledger.remove_margin(1.70, 2.20)[0]) / 2
+        self.assertAlmostEqual(float(consensus.iloc[0]["market_home_win"]), expected)
+        self.assertEqual(int(consensus.iloc[0]["market_partners"]), 2)
+
+        self.assertTrue(ledger.market_consensus(pd.DataFrame([stale])).empty)
 
 
 class TrackRecordTests(unittest.TestCase):
@@ -190,6 +211,71 @@ class TrackRecordTests(unittest.TestCase):
 
     def test_empty_ledger_reports_nothing(self):
         self.assertEqual(ledger.track_record(pd.DataFrame()), {"logged": 0, "games": 0})
+
+
+class MarketComparisonTests(unittest.TestCase):
+    """Cover the model-vs-market report behind the blend decision."""
+
+    @staticmethod
+    def _market_row(game_id: int, home: float, away: float) -> dict:
+        """One partner row quoting only a moneyline."""
+        return {
+            "game_id": game_id, "home_moneyline": home, "away_moneyline": away, "home_regulation": None, "draw_regulation": None,
+            "away_regulation": None, "home_puck_line": None, "home_puck_line_handicap": None, "away_puck_line": None,
+        }
+
+    def test_comparison_scores_model_market_and_blend_on_the_same_games(self):
+        """Ungraded games, other seasons and games without a market price are left out."""
+        graded = {"graded_utc": "x", "regulation_home_goals": 3, "regulation_away_goals": 1}
+        predictions = pd.DataFrame([
+            _prediction(game_id=1, home_win_prob=0.50) | graded | {"home_win": 1},
+            _prediction(game_id=2, home_win_prob=0.50) | graded | {"home_win": 0},
+            _prediction(game_id=3, home_win_prob=0.50) | graded | {"home_win": 1},
+            _prediction(game_id=4, home_win_prob=0.90) | {"graded_utc": None, "home_win": None, "regulation_home_goals": None, "regulation_away_goals": None},
+            _prediction(game_id=5, season_year=2025, home_win_prob=0.90) | graded | {"home_win": 0},
+        ])
+        market = pd.DataFrame([
+            self._market_row(1, 1.25, 5.0),
+            self._market_row(2, 5.0, 1.25),
+            self._market_row(4, 1.5, 2.5),
+            self._market_row(5, 1.5, 2.5),
+        ])
+
+        comparison = ledger.market_comparison(predictions, market, season_year=2026)
+
+        self.assertEqual(comparison["games"], 2)
+        self.assertAlmostEqual(comparison["model_log_loss"], math.log(2.0))
+        self.assertAlmostEqual(comparison["market_log_loss"], -math.log(0.8))
+        self.assertAlmostEqual(comparison["model_minus_market"], math.log(2.0) + math.log(0.8))
+        self.assertAlmostEqual(comparison["standard_error"], 0.0)
+        self.assertAlmostEqual(comparison["mean_abs_gap"], 0.3)
+        self.assertAlmostEqual(comparison["max_abs_gap"], 0.3)
+        self.assertEqual((comparison["model_accuracy"], comparison["market_accuracy"]), (0.5, 1.0))
+        # The market called both games, so the best mix is the market alone.
+        self.assertEqual(comparison["best_market_weight"], 1.0)
+        self.assertAlmostEqual(comparison["blend_log_loss"], -math.log(0.8))
+
+    def test_comparison_keeps_the_model_when_the_market_adds_nothing(self):
+        """A market that is worse on these games gets no weight."""
+        graded = {"graded_utc": "x", "regulation_home_goals": 3, "regulation_away_goals": 1}
+        predictions = pd.DataFrame([
+            _prediction(game_id=1, home_win_prob=0.80) | graded | {"home_win": 1},
+            _prediction(game_id=2, home_win_prob=0.20) | graded | {"home_win": 0},
+        ])
+        market = pd.DataFrame([self._market_row(1, 5.0, 1.25), self._market_row(2, 1.25, 5.0)])
+
+        comparison = ledger.market_comparison(predictions, market)
+
+        self.assertEqual(comparison["best_market_weight"], 0.0)
+        self.assertAlmostEqual(comparison["blend_log_loss"], comparison["model_log_loss"])
+        self.assertLess(comparison["model_minus_market"], 0.0)
+
+    def test_comparison_without_market_prices_reports_no_games(self):
+        predictions = pd.DataFrame([_prediction(game_id=1) | {"graded_utc": "x", "home_win": 1, "regulation_home_goals": 3, "regulation_away_goals": 1}])
+
+        self.assertEqual(ledger.market_comparison(predictions, pd.DataFrame()), {"games": 0})
+        self.assertEqual(ledger.market_comparison(pd.DataFrame(), pd.DataFrame()), {"games": 0})
+        self.assertEqual(ledger.market_comparison(predictions, pd.DataFrame([self._market_row(9, 1.5, 2.5)])), {"games": 0})
 
 
 if __name__ == "__main__":

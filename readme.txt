@@ -42,9 +42,12 @@ ratings from league-wide game data, scores upcoming matchups and simulates the r
 season. See SECTION 10A.
 
 Those prediction cards are now clickable matchup-context surfaces. A normal click opens a
-`Matchup History` modal with the last 10 head-to-head meetings, a plain-text win summary,
-and stacked matchup cards. The primary trigger is a small JS bridge mounted through
-`st.components.v2.component()`; the old `mh=AWY,HOME` query-param path stays as fallback.
+`Matchup` modal: the model's odds first (win, 60-minute result, puck line, each with a one-line
+plain-language explanation and fair decimal odds), then the last 10 head-to-head meetings with a
+plain-text win summary and stacked matchup cards. The card itself shows only the win bar and a
+footer hint, identically on desktop and mobile; there is no hover popover (see SECTION 8B rule 5).
+The primary trigger is a small JS bridge mounted through `st.components.v2.component()`; the old
+`mh=AWY,HOME` query-param path stays as fallback.
 
 `app.py` is the session-state coordinator and render pass. It:
 - attempts to start the optional process-local background cache warmer early through `start_background_warmer()`; this is a no-op unless the env flag enables it
@@ -65,7 +68,7 @@ Top level:
 - `foundation_phase.md` - authoritative cache/foundation notes and migration details
 - `cache_strategy.md` - design rationale for the `NHLClient` / shared-cache direction
 - `scraper.py` - manual historical parquet refresh
-- `train_win_prob.py` - offline trainer AND backtester for the win-probability model and the season simulator; writes the artifact only if its gates pass. `--phase2-report` re-runs the xG / goalie evaluation (report only, never writes the artifact; see SECTION 10A)
+- `train_win_prob.py` - offline trainer AND backtester for the win-probability model and the season simulator; writes the artifact only if its gates pass. `--phase2-report` re-runs the xG / goalie evaluation and `--ledger-report [path]` compares the published predictions with the betting market on the same games (both report only, never write the artifact; see SECTION 10A)
 - `.cache/xg_training/` - trainer-only local cache of parsed play-by-play shots (gitignored, ~14 MB for 2017-18..2025-26); not part of the runtime NHLCache
 - `nhl_historical_seasons.parquet` - historical seasons used by baselines and KNN
 - `win_prob_weights.json` - version-2 model artifact: logistic-regression weights over Elo / shrunk form / back-to-back features, rating hyperparameters, overtime model, simulator noise, the `goal_model` block behind the 60-minute and puck-line markets (present only when its gate passed), and the full backtest report
@@ -111,21 +114,21 @@ version string in Streamlit's bundle.
 - `win_prob.py` - model contract: feature names, artifact validation, scalar / vectorized / decomposed scoring, overtime probability
 - `season_sim.py` - Monte Carlo season + playoff simulator (division / wild-card seeding, exact best-of-7) and the NHL-payload adapters feeding it
 - `goal_model.py` - corrected-Poisson score distribution (tie inflation, empty-net transfers) solved to match the win probability; prices the 60-minute result and puck line; numpy only
-- `ledger.py` - prediction ledger (SQLite in `PUCKPEAK_DATA_DIR`): pregame rows frozen at puck drop, grading, free NHL partner-odds parsing and margin removal, live track-record metrics
+- `ledger.py` - prediction ledger (SQLite in `PUCKPEAK_DATA_DIR`): pregame rows frozen at puck drop, grading, free NHL partner-odds parsing and margin removal (stale partner prices dropped), live track-record metrics, model-vs-market comparison
 - `xg.py` - OFFLINE RESEARCH ONLY (the app never imports it): play-by-play shot parsing, logistic expected-goals scoring, per-game xG / goalie summaries, point-in-time goalie ratings and projected starters, used by `train_win_prob.py --phase2-report`
 - `player_pipeline.py` - full player processing path
 - `team_pipeline.py` - team processing path
 - `controls.py` - top controls expander
 - `sidebar.py` - sidebar UI and add/remove flows
-- `dialog.py` - chart click dialogs and matchup-history modal
+- `dialog.py` - chart click dialogs and the matchup modal (model odds block + head-to-head history)
 - `chart.py` - Plotly render, baseline overlay, share link, native point-click dispatch, and dialog routing
-- `comparison.py` - Overview / Current Standings tabs, the chart-season picker renderer, clickable predictions panel, and live standings board markup
+- `comparison.py` - Overview / Current Standings tabs, the chart-season picker renderer, clickable predictions panel (cards carry no odds detail), and live standings board markup
 - `fragments.py` - `@st.fragment` wrappers around `render_chart`, `render_detail_tabs`, `render_predictions_panel`, and the sidebar FAQ button so widget interactions stay scoped
 - `ui_state.py` - session-state helpers plus the one-slot dialog mutex (`begin_script_run()`,
   `begin_dialog_run(scope)`); see the DIALOG SLOT rules in SECTION 4
 - `stanley_cup.py` - current-standings board builder: merges standings with the season projection (odds / preseason / champion / standings-only modes)
 - `url_params.py` - compact share-link encode/decode with legacy-link sanitization and canonicalization
-- `schedule.py` - live defaults (live > finished > soonest upcoming, preseason included), upcoming games, featured players, matchup-history loading, runtime win-prob inference, the shared team-ratings snapshot, and the cached season projection
+- `schedule.py` - live defaults (live > finished > soonest upcoming, preseason included), upcoming games (`find_upcoming_game` gives the matchup modal the rail's own cached game), featured players, matchup-history loading, runtime win-prob inference, the shared team-ratings snapshot, and the cached season projection
 - `cache_warmer.py` - optional process-local daemon warmer for shared-cache live / seasonal / historical paths
 - `async_preloader.py` - older session-local additive preloader for non-active categories inside the current worker
 
@@ -270,7 +273,7 @@ Rules:
 
 Why it is shaped that way (both failure modes are real, one shipped):
 - Resetting only in `app.py` is what caused the outage: a fragment rerun never re-executes
-  top-level `app.py`, and the Player Details / Team Details / Matchup History dialogs use the
+  top-level `app.py`, and the Player Details / Team Details / Matchup dialogs use the
   default `on_dismiss="ignore"` so closing them reruns nothing either. The flag latched True and
   every later dialog was silently swallowed - chart clicks and player cards alike.
 - Resetting unconditionally in every fragment is wrong the other way: on a full run the
@@ -467,6 +470,16 @@ Three rules that are load-bearing here:
    only the upper third clickable.  Fix is `position: relative` + `z-index` on the element that
    must stay clickable - it changes nothing visually.  If you add another negative-margin pull,
    check what it now overlaps.
+
+5. A POPOVER INSIDE A CARD CANNOT CLIMB OVER THE CARDS BELOW IT.  `.live-game-card` is
+   `position: relative; z-index: 1`, so it is its own stacking context, and each card is a
+   separate `st.markdown` element.  An absolutely positioned child (the old `.lgc-meta-popover`,
+   `z-index: 4`) is only ranked INSIDE its card: every later card is a later sibling at the same
+   `z-index: 1` and paints over whatever spills out of the card above.  The cards have translucent
+   backgrounds, so the spilled popover showed through them - a faded, unreadable box on desktop
+   hover, which is the bug v1.02.3 removed.  Mobile never showed it because the popover was
+   static there.  Detail that does not fit in a card goes in the modal the card opens, not in a
+   hover layer.  `tests/test_styles.py` pins that no `lgc-meta` rule comes back.
 
 Why the page used to flash on every click:
 - streamlit 1.54 marks elements stale and applies
@@ -690,9 +703,12 @@ Runtime rules:
 - preseason / exhibition games (`game_type` not 2 or 3) get NO prediction; the card says so
 - there is no goalie adjustment any more: the old save% overlay was an untested hand-tuned constant
   applied to the most-winning goalie, not the starter
-- surface the result in clickable predictions cards for up to 8 upcoming games; there is still no
-  quick-add action
-- clicking a card should open the matchup-history modal, not mutate the player/team board
+- surface the result in clickable predictions cards for up to 8 upcoming games
+  (`schedule.PREDICTIONS_PANEL_MATCH_LIMIT`); there is still no quick-add action
+- the card shows the win bar, an `Early-season estimate` tag when flagged, and the footer hint
+  `Odds & head-to-head ›`. Fair odds, the 60-minute result, the puck line and the model notes
+  are in the modal, not on the card
+- clicking a card should open the matchup modal, not mutate the player/team board
 
 Season simulator rules (`get_season_projection()`, 10,000 simulations, ~0.5 s warm, warmed hourly
 by the cache warmer's seasonal cycle):
@@ -732,12 +748,30 @@ Matchup-history runtime rules:
   page re-rendered itself". It is now `role="button" tabindex="0"` and the bridge handles
   Enter/Space. `_build_live_game_card_href()` still exists, but only for shareable deep links.
 - the old `mh=AWY,HOME` query-param contract remains as a no-JS fallback
-- `dialog.show_matchup_history()` adds a plain-text summary of wins by each team above the cards
+- `dialog.show_matchup_history()` (dialog title `Matchup`) renders, in one markdown block: the
+  title, when/where, the model's odds block, then the `Head-to-head` label with a plain-text
+  summary of wins by each team; the history cards follow
+- the odds block (`dialog._build_matchup_prediction_markup`) has three markets, each with one
+  plain sentence: `To win` (overtime and shootout included), `After 60 minutes` (a tie counts as
+  Draw) and `Puck line` (favourite -1.5 needs a win by 2 or more). Every cell shows the
+  probability and its fair decimal odds. A legend and a notes line (model driver, back-to-back,
+  early season) close the block
+- the modal finds its game with `schedule.find_upcoming_game(away, home)`, which reads the same
+  cached `get_upcoming_games(limit=PREDICTIONS_PANEL_MATCH_LIMIT)` call as the rail: same numbers
+  as the card, no request. The click payload still carries only `AWY,HOME`. A pair that is not
+  in the rail (a pasted `?mh=` link) shows the history alone
+- without a goal model in the artifact the block keeps the `To win` row and drops the other two
+- the head-to-head cards (`dialog._build_matchup_card_html(compact_layout=True)`) are inline-styled
+  and carry `mh-card` class hooks only so `assets/puckpeak.css` can shrink them on phones (below
+  480px, and again below 350px, with `!important` because the sizes are inline). Without the
+  hooks a 390px modal left about 30px for the 22px team code and it wrapped one letter per line.
+  The non-compact season-snapshot layout has no hooks and is unchanged
 
 Guardrails:
 - odds are model probabilities, not bookmaker prices: "fair odds" carry no margin and must never be
-  presented as a betting line
-- the early-season note must stay while either team has fewer than 10 games
+  presented as a betting line. The modal's legend says so in words; keep it
+- the early-season note must stay while either team has fewer than 10 games: as the
+  `Early-season estimate` tag on the card and as the full sentence in the modal
 PHASE 4 - PREDICTION LEDGER AND MARKET BENCHMARK (v1.02.1, `nhl/ledger.py`) - built with free data only
 Why: a paid prediction product needs a record nobody can edit in hindsight, and "close to betting
 sites" has to be measured, not claimed. No paid data: the owner declined all paid sources.
@@ -758,6 +792,15 @@ sites" has to be measured, not claimed. No paid data: the owner declined all pai
   American odds, European partners decimal odds - `ledger.odds_to_probability` tells them apart by
   value (American odds are never between -100 and +100; decimal NHL prices are never >= 100). Margin
   is removed per partner by proportional normalization, then partners are averaged per game
+- STALE PARTNER ROWS (v1.02.3): a partner feed can keep listing a game while its prices have not
+  moved for days (seen 2026-10-01: Veikkaus last updated 2026-09-23 while listing 2026-09-30
+  games). `ledger.market_consensus` skips a row whose `feed_updated_utc` is more than
+  `MARKET_STALE_HOURS` (24) before the game's start. Averaging stale prices made the market look
+  worse than it is, which flattered the model in the public line. A row without a parseable
+  timestamp is kept; a game whose every row is stale has no consensus
+- IN-PLAY PRICES: after puck drop the feed serves live odds (moneylines like -100000) until it
+  rolls to the next odds date. They never reach the ledger because rows freeze at puck drop. Do
+  not read the feed for "current market" after a game has started
 - GRADING: the same cycle grades every logged game found in the completed-game table (moneyline
   result, result type, final and regulation goals)
 - TRACK RECORD (`schedule.get_track_record()`, cached 10 min, read-only): the predictions panel
@@ -767,6 +810,20 @@ sites" has to be measured, not claimed. No paid data: the owner declined all pai
   Live and backtest numbers are never mixed
 - NEVER shown: bookmaker names, odds or links (gambling advertising in the EU/CZ). Market prices are
   used only for the aggregate comparison
+- LEDGER REPORT (v1.02.3): `python train_win_prob.py --ledger-report [path]` prints, per season,
+  the live record and `ledger.market_comparison`: model and market log loss on the same games,
+  their paired difference with a standard error, the average and largest gap between the two
+  probabilities, and the market share that would have scored best (logit-scale mix, fitted on
+  those same games, so in-sample). Report only. The trainer is not in the Docker image, so copy
+  the ledger down first:
+    ssh hetzner "docker cp puck-peak:/app/.data/prediction_ledger.sqlite3 /tmp/ledger.sqlite3"
+    scp hetzner:/tmp/ledger.sqlite3 ./ledger.sqlite3
+    python train_win_prob.py --ledger-report ledger.sqlite3
+- MARKET BLEND DECISION: not blended. The market's prices are the one free input expected to beat
+  this model, but there is no free history to backtest a blend, the public "model vs market" line
+  would become circular, and the NHL terms / gambling-advertising questions are open. Revisit when
+  the report shows `MARKET_DECISION_GAMES` (300) graded games with a market price; below that the
+  gap is mostly noise (standard error about 0.04 / sqrt(games))
 - LIMITS: the partner feeds only cover the next odds date, so there is no free historical closing-
   line data; the benchmark accumulates from the 2026-27 opener. The only free archive
   (sportsbookreviewsonline NHL archive) is gone; every other historical source is paid
@@ -804,8 +861,57 @@ shrinkage). `expected_total` exists internally; do not surface it as a predictio
 passing backtest.
 Runtime: `get_current_team_ratings()` returns `scoring_environment`; `get_game_win_probabilities()`
 adds `markets` (`regulation` home/draw/away, `puck_line` home/away -1.5) when the artifact has a goal
-model; the card popover shows both markets with fair decimal odds (no margin), away / draw / home
+model; the matchup modal shows both markets with fair decimal odds (no margin), away / draw / home
 left to right to match the card, favourite at -1.5.
+
+PHASE 5 RESULT (v1.02.3) - full review of the prediction engine; nothing shipped in the model
+Question: can the odds be meaningfully improved for free (Monte Carlo, other data, other models)?
+Answer: no. Method: every idea went through the trainer's own rolling-origin folds (2021-22 to
+2025-26, 6,560 games, nested selection as in `evaluate_fold`), in memory. The baseline reproduced
+the artifact exactly: log loss 0.6450 / 0.6530 / 0.6572 / 0.6636 / 0.6881, pooled 0.6614 against
+0.6905 for the constant home rate, 59.7% winners. Gains below are pooled log loss on the same games
+(+ is better); their standard errors are 0.0002 to 0.0005. The bar stays +0.002 (Phase 2 gate).
+- Monte Carlo for single games: no gain possible. The 16x16 score grid is the exact answer a
+  simulation approximates; 10,000 runs would only add about +-0.5 points of sampling noise
+- rest days / 3-in-4 / 4-in-6 on top of the back-to-back flags: -0.0002 to -0.0009
+- recency-weighted form replacing season-to-date form (half-life 15 / 30 / 60 games): +0.0006 /
+  -0.0002 / -0.0007
+- CLOSEST MISS: a recent shots-on-goal trend (exponentially weighted share, half-life 6-10 games,
+  minus the season-to-date share) with a wider C grid: +0.0014 (se 0.0004), positive in all five
+  seasons (+0.0006 to +0.0026). It moves a typical prediction by 1.2 points, flips 3% of picks,
+  59.7% -> 59.8-59.9% winners. But the season-simulator backtest got slightly worse with that model
+  (P(make playoffs) log loss 0.3531 -> 0.3559). Below the bar; recheck at the next offseason
+  retrain with one more season. Recent goal differential alone adds nothing (-0.0002)
+- wider C grid alone (0.002..1.0; the selection sits at the 0.05 edge): +0.0005. Free, fold it
+  into the next retrain
+- team shooting % / save % (shrunk): -0.0003 to 0.0000
+- goal-margin ratings (regulation margin, capped), added or replacing Elo: -0.0001 to -0.0007
+- Elo variants: overtime / shootout wins count 0.75 or 0.6: -0.0003; K raised early in a
+  season: 0.0000
+- training on the last 2-3 seasons or weighting recent seasons: +0.0002 to +0.0004 (noise)
+- rolling recalibration of the logit slope on the last 400-2000 games: 0.0000 to +0.0003
+- early-season discount (rating x games-played interaction): -0.0006 to -0.0007. The first 10
+  games of a season are NOT overconfident (calibration slope 0.85, standard error about 0.13;
+  skill close to the full-season average), so the opening-night gaps to the market are not a
+  systematic bias in backtest
+- wider Elo grid (carryover to 1.0), wider form-prior grid, other prior carry-over: -0.0006 to
+  +0.0001
+- gradient boosting, pairwise interactions: -0.0009 to -0.0035
+- 60-minute draw: no seasonality (month, late-season flag: -0.0002)
+- season simulator overtime rule: favourites won 53.4% of games tied after 60 minutes (n=1,459);
+  the simulator assumes they win at their full win probability (60.6% on those games), which
+  shifts projected points by up to +-1.3 over a season. Fixing it changed nothing measurable:
+  P(make playoffs) log loss 0.3531 -> 0.3531, projected-points error 10.7 -> 10.8 (opening),
+  7.4 -> 7.4, 4.7 -> 4.7, 3.3 -> 3.3 (mid-March). Left as is
+- runtime Elo replays 3 warm-up seasons, the trainer all of them: at most 3.8 Elo points, about
+  0.6 points of win probability between two teams. Left as is
+- UPPER BOUND: with hindsight knowledge of every team's end-of-season strength as its preseason
+  rating, the gain is +0.006 (form prior) to +0.011 (Elo start, which also leaks in-season
+  results). A roster-based preseason prior would capture a fraction of that, mostly in October,
+  and needs new data plumbing (historical opening rosters). Offseason candidate, not built
+- 2025-26 was a real parity season, not a data bug: home teams won 52.2%, 24.8% of games were
+  tied after 60 minutes, and the model's calibration slope fell to 0.59 that season
+- what would beat this model is the betting market itself; see "MARKET BLEND DECISION" above
 
 PHASE 2 RESULT (v1.01.9) - expected goals and goalies did NOT improve the model; not shipped
 Tested with `python train_win_prob.py --phase2-report` (reproducible; first run fetches ~12,000
@@ -885,7 +991,7 @@ Module responsibilities:
 - `win_prob.py` - artifact validation, scalar / vectorized scoring, linear decomposition for the simulator, overtime probability
 - `season_sim.py` - vectorized season + playoff Monte Carlo, exact series DP, bracket / standings / schedule adapters
 - `goal_model.py` - regulation score grid, moneyline-matching split, 60-minute and puck-line pricing, league scoring level
-- `ledger.py` - prediction ledger storage and grading, partner-odds parsing (American and decimal), market consensus, track record
+- `ledger.py` - prediction ledger storage and grading, partner-odds parsing (American and decimal), market consensus (stale partner rows dropped), track record, model-vs-market comparison for `--ledger-report`
 - `xg.py` - offline research only: play-by-play parsing, xG scoring, per-game xG and goalie summaries, `GoalieHistory` point-in-time ratings, `choose_starter`, `research_game_features` (Phase 2 report)
 - `player_pipeline.py` - end-to-end player pipeline and peak metadata
 - `player_pipeline.py` now owns the extra TOI projection gate and the modern-coverage filtering that
@@ -893,14 +999,14 @@ Module responsibilities:
 - `team_pipeline.py` - end-to-end team pipeline, including selected-season team season-progress mode
 - `controls.py` - top control surface; returns `(metric, do_cumul)`
 - `sidebar.py` - player/team add flows plus sidebar status widgets
-- `dialog.py` - player clicks, team game snapshot clicks, matchup-history modal, projection, and baseline dialogs
+- `dialog.py` - player clicks, team game snapshot clicks, the matchup modal (odds block and market cells, then head-to-head history), projection, and baseline dialogs
 - `dialog.py` now inserts the rarity callout directly under `Career Subtotals` in player age snapshots
 - `chart.py` - figure assembly, baseline overlay, share-link button, Plotly click bridge, and player/team click dispatch
 - `comparison.py` - season-aware Overview / Current Standings tabs, the chart-season picker renderer, JS click bridges (prediction-card and identity-card), clickable predictions panel, and live standings board wrapper
 - `fragments.py` - `@st.fragment`-decorated wrappers around `render_chart`, `render_detail_tabs`, `render_predictions_panel`, and the sidebar FAQ button; called during the mount phase (the FAQ one from `render_sidebar`) so widget interactions only rerun the affected panel
 - `stanley_cup.py` - standings-board assembly with simulated playoff / Cup odds, preseason projection and champion modes
 - `url_params.py` - compact share-link encoder/decoder with legacy-link sanitization and canonicalization
-- `schedule.py` - live/recent matchup detection, upcoming games, featured players, matchup history, runtime pregame win-prob inference, team-ratings snapshot and season projection
+- `schedule.py` - live/recent matchup detection, upcoming games and `find_upcoming_game` for the matchup modal, featured players, matchup history, runtime pregame win-prob inference, team-ratings snapshot and season projection
 - `cache_warmer.py` - optional live / seasonal / historical daemon warmer for shared-cache entry points
 - `async_preloader.py` - older per-session non-active-category warm-up inside the current worker
 

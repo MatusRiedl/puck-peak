@@ -532,50 +532,32 @@ div.element-container:has(.faq-btn-anchor) + div.element-container button:hover 
     line-height: 1.2;
     min-width: 0;
 }
-.lgc-meta {
+/* Card footer: the only hint that the card opens the odds + head-to-head modal.
+   There is deliberately no hover popover. The old one sat inside the card's own
+   stacking context, so the next cards (later siblings, translucent backgrounds)
+   painted over it and it read as a faded, unreadable box. */
+.lgc-footer {
     display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    justify-content: flex-start;
-    gap: 0.14rem;
-    min-width: 220px;
-    max-width: min(280px, calc(100vw - 4rem));
-    text-align: left;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+    font-size: 0.74rem;
+    line-height: 1.2;
 }
-.lgc-meta-popover {
-    position: absolute;
-    top: 0.1rem;
-    right: 0;
-    z-index: 4;
-    opacity: 0;
-    visibility: hidden;
-    transform: translateY(6px);
-    pointer-events: none;
-    transition: opacity 140ms ease, visibility 140ms ease, transform 140ms ease;
+.lgc-footer__note {
+    min-width: 0;
+    color: #b1b1b1;
 }
-.live-game-card-shell:hover .lgc-meta-popover,
-.live-game-card-shell:focus-within .lgc-meta-popover,
-.live-game-card-link:focus + .live-game-card .lgc-meta-popover,
-.live-game-card-link:focus-visible + .live-game-card .lgc-meta-popover,
-.live-game-card:hover .lgc-meta-popover,
-.live-game-card:focus-within .lgc-meta-popover,
-.live-game-card:focus .lgc-meta-popover {
-    opacity: 1;
-    visibility: visible;
-    transform: translateY(0);
-}
-.lgc-meta-popover .lgc-meta {
-    padding: 0.48rem 0.58rem;
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 10px;
-    background: rgba(8, 13, 21, 0.96);
-    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.34);
-    backdrop-filter: blur(10px);
-}
-.lgc-meta-popover .live-games-probability__meta {
-    font-size: 0.82rem;
+.lgc-footer__hint {
+    margin-left: auto;
+    color: #8f9bb0;
     font-weight: 600;
-    color: #c3c3c3;
+    white-space: nowrap;
+    transition: color 120ms ease;
+}
+.live-game-card-shell:hover .lgc-footer__hint,
+.live-game-card-shell:focus-within .lgc-footer__hint {
+    color: #e2e8f0;
 }
 .track-record {
     margin: 0 0 0.6rem 0;
@@ -598,55 +580,141 @@ div.element-container:has(.faq-btn-anchor) + div.element-container button:hover 
 .track-record__line--muted {
     color: rgba(203, 213, 225, 0.66);
 }
-.lgc-markets {
-    width: 100%;
-    margin-top: 0.28rem;
-    padding-top: 0.3rem;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
+/* Matchup modal: the model's odds block above the head-to-head list */
+.matchup-when {
+    margin: 0.2rem 0 0;
+    color: #8b949e;
+    font-size: 0.9rem;
 }
-.lgc-markets__title {
-    margin: 0.12rem 0 0.18rem;
-    color: #8f9bb0;
-    font-size: 0.68rem;
+.matchup-odds {
+    margin: 0.7rem 0 1rem;
+    padding: 0.75rem 0.85rem 0.7rem;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.03);
+}
+.matchup-odds__title {
+    margin: 0.75rem 0 0.05rem;
+    color: #f1f5f9;
+    font-size: 0.95rem;
     font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
 }
-.lgc-markets__row {
+.matchup-odds__title:first-child {
+    margin-top: 0;
+}
+.matchup-odds__hint {
+    margin: 0 0 0.4rem;
+    color: #94a3b8;
+    font-size: 0.8rem;
+    line-height: 1.35;
+}
+.matchup-odds__row {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.3rem;
+    gap: 0.4rem;
 }
-.lgc-markets__row--three {
+.matchup-odds__row--three {
     grid-template-columns: repeat(3, minmax(0, 1fr));
 }
-.lgc-market {
+.matchup-odds__cell {
     display: flex;
     flex-direction: column;
     align-items: center;
     min-width: 0;
-    padding: 0.2rem 0.25rem;
-    border-radius: 6px;
-    background: rgba(255, 255, 255, 0.04);
+    padding: 0.45rem 0.35rem 0.4rem;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.05);
 }
-.lgc-market__label {
+.matchup-odds__label {
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: #aeb7c6;
-    font-size: 0.68rem;
+    color: #cbd5e1;
+    font-size: 0.82rem;
 }
-.lgc-market__pct {
-    color: #f1f5f9;
-    font-size: 0.86rem;
+.matchup-odds__pct {
+    color: #f8fafc;
+    font-size: 1.3rem;
     font-weight: 800;
+    line-height: 1.25;
     font-variant-numeric: tabular-nums;
 }
-.lgc-market__odds {
+.matchup-odds__odds {
     color: #fde68a;
-    font-size: 0.72rem;
+    font-size: 0.86rem;
     font-variant-numeric: tabular-nums;
+}
+.matchup-odds__legend {
+    margin-top: 0.7rem;
+    padding-top: 0.55rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    color: #94a3b8;
+    font-size: 0.78rem;
+    line-height: 1.4;
+}
+.matchup-odds__notes {
+    margin-top: 0.35rem;
+    color: #cbd5e1;
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+.matchup-section-title {
+    margin: 0.2rem 0 0;
+    color: #8f9bb0;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+/* Matchup modal: head-to-head cards. They are inline-styled; these hooks exist only so
+   phones can shrink them. In a 390px-wide modal the 22px team code had about 30px left
+   after the logo and the score, and it wrapped one letter per line. */
+.mh-card__abbr,
+.mh-card__side {
+    white-space: nowrap;
+}
+@media (max-width: 480px) {
+    .mh-card {
+        padding: 12px !important;
+    }
+    .mh-card__row,
+    .mh-card__team {
+        gap: 6px !important;
+    }
+    .mh-card__logo {
+        height: 28px !important;
+        max-width: 40px;
+        object-fit: contain;
+    }
+    .mh-card__abbr {
+        font-size: 18px !important;
+    }
+    .mh-card__scores {
+        gap: 8px !important;
+        padding: 0 2px !important;
+    }
+    .mh-card__score {
+        font-size: 26px !important;
+    }
+    .mh-card__at {
+        font-size: 15px !important;
+    }
+}
+@media (max-width: 350px) {
+    .mh-card__logo {
+        height: 22px !important;
+        max-width: 30px;
+    }
+    .mh-card__abbr {
+        font-size: 16px !important;
+    }
+    .mh-card__scores {
+        gap: 6px !important;
+    }
+    .mh-card__score {
+        font-size: 22px !important;
+    }
 }
 .lgc-prob-section {
     /* probability labels + bar embedded below the header block */
@@ -749,50 +817,14 @@ div.element-container:has(.faq-btn-anchor) + div.element-container button:hover 
     pointer-events: none;
     z-index: 2;
 }
-.live-games-probability__meta {
-    color: #b1b1b1;
-    font-size: 0.75rem;
-    line-height: 1.2;
-    overflow-wrap: anywhere;
-}
-.live-games-probability__meta--note {
-    margin-top: 0.18rem;
-    padding-top: 0.18rem;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
-}
 div.element-container:has(.live-game-card) {
     margin-bottom: 0.55rem !important;
 }
 
-/* TABLET (≤1200px) — live game card hover tooltip: narrows max-width */
-@media (max-width: 1200px) {
-    .lgc-meta {
-        max-width: min(250px, calc(100vw - 4rem));
-    }
-}
-
-/* MOBILE — live game cards: disables hover lift; shows stat tooltip inline instead of floating */
+/* MOBILE — live game cards: disables hover lift */
 @media (hover: none), (max-width: 768px) {
     .live-game-card {
         transform: none !important;
-    }
-    .lgc-meta-popover {
-        position: static;
-        opacity: 1;
-        visibility: visible;
-        transform: none;
-        pointer-events: auto;
-        margin-top: 0.35rem;
-    }
-    .lgc-meta-popover .lgc-meta {
-        min-width: 0;
-        max-width: none;
-        padding: 0;
-        border: 0;
-        border-radius: 0;
-        background: transparent;
-        box-shadow: none;
-        backdrop-filter: none;
     }
     div:has(> #controls-dropdowns) + div [data-testid="stHorizontalBlock"] {
         flex-wrap: wrap !important;
