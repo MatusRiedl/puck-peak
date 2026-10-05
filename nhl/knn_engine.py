@@ -14,7 +14,6 @@ from nhl.constants import (
     RATE_STATS,
     STAT_CAPS,
     STAT_FLOORS,
-    current_season_year,
     season_games,
 )
 from nhl.era import apply_era_to_hist
@@ -234,25 +233,14 @@ def _run_knn_projection_uncached(
     """
     max_age       = career_df['Age'].max()
     base_name     = career_df['BaseName'].iloc[0] if 'BaseName' in career_df.columns else ''
-    # Normalize to float so partial-season pacing can safely scale integer season totals.
-    career_paced  = pd.to_numeric(career_df[metric], errors='coerce').astype(float)
-
-    # Mid-season pacing: extrapolate the last (current) season to a full schedule.
-    # Length is season-dependent - 84 games from 2026-27, 82 before - so a hardcoded
-    # 82 would understate every paced rate by ~2.4% once the expansion lands.
-    _full_season_gp = season_games()
-    if (season_type != "Playoffs"
-            and len(career_df) > 0
-            and career_df.iloc[-1]['SeasonYear'] >= current_season_year()
-            and career_df.iloc[-1]['GP'] < _full_season_gp
-            and career_df.iloc[-1]['GP'] > 0):
-        pace = float(_full_season_gp) / career_df.iloc[-1]['GP']
-        if metric in ['Points', 'Goals', 'Assists', 'Wins', 'Shutouts', 'Saves', '+/-', 'PIM']:
-            career_paced.iloc[-1] *= pace
+    # Completed seasons only: the player pipeline splits an in-progress season off
+    # before calling this. Never pace a short season up to a full schedule here -
+    # a 4-game start paced to 84 games is what seeded the absurd forecasts.
+    career_vals   = pd.to_numeric(career_df[metric], errors='coerce').astype(float)
 
     match_ages  = career_df['Age'].tolist()
-    match_vals  = career_paced.tolist()
-    current_candidates = career_paced.loc[career_df['Age'] == max_age].dropna()
+    match_vals  = career_vals.tolist()
+    current_candidates = career_vals.loc[career_df['Age'] == max_age].dropna()
     if current_candidates.empty:
         return [], []
     current_val = float(current_candidates.iloc[-1])

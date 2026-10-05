@@ -185,6 +185,14 @@ SH%: linear extrapolation yields implausible results for skaters and the app
 does not currently maintain a separate KNN-only path for it.
 """
 
+LIVE_SEASON_SUFFIX = " (Season to date)"
+"""
+Trace-name suffix for the in-progress season point on the age chart.
+The player pipeline splits the current, unfinished season off the real line and
+labels it `<name> (Season to date)`, the same way projections are `<name> (Proj)`.
+It plots as a standalone dot holding the season-to-date actual, never a pace.
+"""
+
 # ---------------------------------------------------------------------------
 # NHLe (NHL Equivalency) multipliers — 2024 Bacon/Chatel model values
 # ---------------------------------------------------------------------------

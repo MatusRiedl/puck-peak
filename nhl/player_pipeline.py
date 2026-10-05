@@ -4,14 +4,20 @@ import pandas as pd
 
 from nhl.constants import (
     KNN_ONLY_PROJECTION_METRICS,
+    LIVE_SEASON_SUFFIX,
     ML_SUPPORTED_METRICS,
     NHLE_DEFAULT_MULTIPLIER,
     NHLE_MULTIPLIERS,
     NO_PROJECTION_METRICS,
     RATE_STATS,
+    current_season_year,
     normalize_league_abbrev,
 )
-from nhl.data_loaders import get_player_raw_stats, get_player_season_game_log
+from nhl.data_loaders import (
+    get_player_raw_stats,
+    get_player_season_game_log,
+    regular_season_in_progress,
+)
 from nhl.era import apply_era_to_hist, get_era_multiplier, get_goalie_era_sv_offset
 from nhl.knn_engine import run_knn_projection, run_linear_fallback
 
@@ -108,6 +114,8 @@ def process_players(
 
     _league_filter = [] if league_filter is None else league_filter
     season_mode = str(selected_season) != "All"
+    # Resolved on first need: whether the current season is still being played.
+    _live_season_open = None
 
     # Era-adjust historical data once per category before the player loop.
     # This avoids per-player era adjustment inside the projection path and keeps
@@ -329,6 +337,22 @@ def process_players(
         df['BaseName'] = base_name
         df['Player']   = base_name
 
+        # --- Step 6c: Split off the in-progress season (age mode only) ---
+        # A season a few games old is not a season: drawn on the line it looks
+        # like a collapse, and fed to the projection it seeds the forecast.
+        # It becomes a standalone point and everything below runs on completed
+        # seasons only, so the forecast continues from the last full season.
+        live_row = pd.DataFrame()
+        if not season_mode and not games_mode and len(df) > 1:
+            last_idx = df['Age'].idxmax()
+            if int(df.loc[last_idx, 'SeasonYear']) == current_season_year():
+                if _live_season_open is None:
+                    _live_season_open = regular_season_in_progress(current_season_year())
+                if _live_season_open:
+                    live_row = df.loc[[last_idx]].copy()
+                    live_row['Player'] = f"{base_name}{LIVE_SEASON_SUFFIX}"
+                    df = df.drop(index=last_idx).reset_index(drop=True)
+
         # --- Step 7: Origin-anchor zero row (Games Played cumulative mode) ---
         if games_mode and do_cumul:
             # Anchor every player's line at career game 0 so all share the same
@@ -395,10 +419,15 @@ def process_players(
         if can_project and metric == "TOI":
             can_project = _can_project_toi(df, stat_category)
 
-        # Thin‑data guard: no projection if career is too short
+        # Thin‑data guard: no projection if career is too short. The in-progress
+        # season still counts here, so splitting it off changes what the forecast
+        # is built from, not who gets one.
         if can_project and metric != "TOI":
             seasons  = int(df['Age'].nunique()) if 'Age' in df.columns else 0
             total_gp = float(df['GP'].sum()) if 'GP' in df.columns else 0
+            if not live_row.empty:
+                seasons  += len(live_row)
+                total_gp += float(live_row['GP'].sum())
             min_gp   = MIN_CAREER_GP_FOR_PROJ_GOALIE if is_goalie else MIN_CAREER_GP_FOR_PROJ_SKATER
             if seasons < MIN_SEASONS_FOR_PROJ or total_gp < min_gp:
                 can_project = False
@@ -446,6 +475,10 @@ def process_players(
         # --- Step 10: Cumulative toggle (age mode only) ---
         if do_cumul and not games_mode:
             # games_mode handles cumulation in Step 6a to avoid double-application
+            if not live_row.empty:
+                # Career total to date: every completed season plus this one so far.
+                completed_total = float(df.loc[df['Age'] <= max_age, metric].sum())
+                live_row[metric] = completed_total + live_row[metric]
             df[metric] = df[metric].cumsum()
 
         # --- Step 11: 3-season rolling average smoothing ---
@@ -464,11 +497,16 @@ def process_players(
         else:
             final_player_df = df.copy()
 
+        # The in-progress season rides along unsmoothed as its own trace.
+        if not live_row.empty:
+            final_player_df = pd.concat([final_player_df, live_row], ignore_index=True)
+
         # Look up the star's chart y-value at the peak position (post-smoothing/cumsum)
         if _peak_x is not None and _peak_sy is not None:
             x_col_lk  = 'CumGP' if games_mode else 'Age'
             real_only = final_player_df[
                 ~final_player_df['Player'].str.contains(r'\(Proj\)', na=False)
+                & ~final_player_df['Player'].str.endswith(LIVE_SEASON_SUFFIX, na=False)
             ]
             match = real_only[real_only[x_col_lk] == _peak_x]
             if not match.empty and metric in match.columns:

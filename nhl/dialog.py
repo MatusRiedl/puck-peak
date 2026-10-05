@@ -6,7 +6,13 @@ from html import escape
 import pandas as pd
 import streamlit as st
 
-from nhl.constants import ACTIVE_TEAMS, NHLE_DEFAULT_MULTIPLIER, NHLE_MULTIPLIERS, TEAM_BRAND_COLORS
+from nhl.constants import (
+    ACTIVE_TEAMS,
+    LIVE_SEASON_SUFFIX,
+    NHLE_DEFAULT_MULTIPLIER,
+    NHLE_MULTIPLIERS,
+    TEAM_BRAND_COLORS,
+)
 from nhl.data_loaders import (
     get_all_time_rank,
     get_player_identity_summary,
@@ -908,7 +914,11 @@ def show_season_details(
 ) -> None:
     """Render the correct click dialog for a real point, projection, or baseline."""
     age = int(age)
+    # The in-progress season dot is real data; it only carries its own trace name.
+    is_live       = player_name.endswith(LIVE_SEASON_SUFFIX)
     clean_name    = player_name.replace(" (Proj)", "")
+    if is_live:
+        clean_name = clean_name[: -len(LIVE_SEASON_SUFFIX)]
     baseline_key  = BASELINE_LABEL_TO_KEY.get(clean_name)
     is_baseline   = baseline_key is not None
     is_projection = "(Proj)" in player_name
@@ -916,6 +926,8 @@ def show_season_details(
 
     if game_number is not None:
         st.markdown(f"### {player_name} — Game {int(game_number)} · Age {age}")
+    elif is_live:
+        st.markdown(f"### {clean_name} at Age {age} · season in progress")
     else:
         st.markdown(f"### {player_name} at Age {age}")
 
@@ -1073,8 +1085,13 @@ def show_season_details(
             'Points', 'Goals', 'Assists', 'Wins', 'Shutouts', 'GP', 'PIM', 'Saves', '+/-'
         ]
 
-        # Projected career totals up to clicked age
-        player_data = full_df[full_df['BaseName'] == clean_name]
+        # Projected career totals up to clicked age. Leave the in-progress row
+        # out: at the current age it shares the Age with the forecast, and
+        # drop_duplicates below would keep whichever comes last.
+        player_data = full_df[
+            (full_df['BaseName'] == clean_name)
+            & ~full_df['Player'].astype(str).str.endswith(LIVE_SEASON_SUFFIX)
+        ]
         player_data = player_data[player_data['Age'] <= age].drop_duplicates(
             subset=['Age'], keep='last'
         )

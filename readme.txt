@@ -333,15 +333,26 @@ SECTION 6 - DATA PIPELINE (PER PLAYER, PER RENDER)
    - Selected-season mode: keep one row per real game, sort by `GameDate` + `GameId`, build `CumGP`, preserve `Age` plus exact game metadata (`GameId`, `GameDate`, teams, home/road) for clicks and peak copy.
    - Career Games Played mode: group by `SeasonYear`, build `CumGP`, keep `Age` for clicks.
    - Age mode: group by `Age`, preserve latest `SeasonYear`, compute rate stats.
+7c. Age mode only: split off the in-progress season. When the latest row's `SeasonYear` is
+   `current_season_year()` and `data_loaders.regular_season_in_progress()` says the regular season
+   still has unplayed games (cached league schedule; May-August fallback when it cannot load), that
+   row leaves the real line and becomes `<name> (Season to date)` (`LIVE_SEASON_SUFFIX`). Steps 8-12
+   then run on completed seasons only. A player whose only row is the current season keeps it as a
+   normal real point.
 8. Detect peak before projection, cumsum, and smoothing.
 9. If allowed, project to age 40.
    - KNN path uses `run_knn_projection()`.
    - Fallback path uses `run_linear_fallback()`.
    - `TOI` is the exception: it is now KNN-only for skaters and never uses the linear fallback.
-   - Current in-progress seasons are pace-adjusted inside the KNN step before clone matching.
-10. Apply cumulative mode in Age mode only.
-11. Apply 3-season rolling smoothing when enabled.
-12. Split real vs projected traces.
+   - The forecast starts from the last COMPLETED season. Nothing paces a partial season up to a
+     full schedule any more. The old KNN pacing turned Paul Cotter's 6 points in 4 games into a
+     126-point start and Juraj Slafkovsky's 0 in 2 into a flat zero forecast. It also scaled
+     finished injury-shortened seasons all summer, because `current_season_year()` only rolls over
+     in September.
+10. Apply cumulative mode in Age mode only. The in-progress point becomes the career total to date
+    (completed seasons plus this one so far).
+11. Apply 3-season rolling smoothing when enabled. The in-progress point is never smoothed.
+12. Split real vs projected traces, then append the in-progress row as its own trace.
 
 Projection gate:
 - not in Games Played mode
@@ -349,14 +360,20 @@ Projection gate:
 - `do_predict` is on
 - max age is below 40
 - metric is not in `NO_PROJECTION_METRICS`
-- thin-data guard passes minimum seasons and GP thresholds
+- thin-data guard passes minimum seasons and GP thresholds (the in-progress season still counts
+  toward these, so splitting it off never takes a forecast away)
 - `TOI` also requires modern TOI-bearing history: at least 3 usable `1997+` seasons with nonzero
   `TotalTOIMins`, at least 120 GP across those seasons, and a usable TOI row at the player's latest age
 
 Split behavior:
-- real trace uses `Age <= max_age`
+- real trace uses `Age <= max_age` (max_age = last completed season)
 - projection trace uses `Age >= max_age`
 - the last real point is duplicated into the projected trace for visual continuity
+- the in-progress trace holds one row, at the same age as the first projected point. That is
+  deliberate: the dot is the check against the forecast. Anything that sums or dedupes by `Age`
+  across a player's rows must leave it out. `dialog.show_season_details()` does this for the
+  projected career total. The Overview cards keep it, because their career totals should include
+  this season
 
 SECTION 7 - HYBRID KNN PROJECTION ENGINE
 ----------------------------------------
@@ -511,6 +528,11 @@ SECTION 9 - PLOTLY RENDERING GUARDRAILS
 Visual rules:
 - real data = solid colored line with filled markers
 - projection = dotted player-colored line with open markers
+- in-progress season = one standalone enlarged dot in the player's color with a light ring
+  (`LIVE_SEASON_MARKER_*`), plotting the season-to-date ACTUAL, never a pace. Its tooltip shows GP
+  so far and, for counting stats outside cumulative mode, the full-season pace. It shares the
+  player's legend group, so the card trace toggle hides it too. A click opens the normal real-season
+  snapshot
 - baseline = dashed white semi-transparent line with tiny markers
 
 CHART IDENTITY - two different things, do not merge them again:

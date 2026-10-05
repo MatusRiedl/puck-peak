@@ -1663,7 +1663,8 @@ def _render_overview_player_card(
                 if not peak_row_df.empty and "GP" in peak_row_df.columns
                 else "?"
             )
-            sy_str = f"{sy - 1}-{str(sy)[2:]}" if sy else "?"
+            # SeasonYear is the season START year (2025 is 2025-26).
+            sy_str = _season_span_label(sy) or "?"
             best_row = _build_card_context_row(
                 f"Best at age {age} ({sy_str})"
                 f" -- {_format_peak_metric_value(metric, val)} {metric_short} in {peak_gp} GP",
@@ -1916,7 +1917,7 @@ def _render_overview_teams(
             rank_row = _build_card_context_row(f"#{wins_rank} in franchise Wins")
             best_row = ""
             if best_year and best_wins is not None:
-                sy_str = f"{best_year - 1}-{str(best_year)[2:]}"
+                sy_str = _season_span_label(best_year) or "?"
                 best_row = _build_card_context_row(
                     f"Best season: {sy_str} -- {best_wins} W in {best_gp} GP",
                     font_weight=400,

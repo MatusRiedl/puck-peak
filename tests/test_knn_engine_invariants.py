@@ -235,8 +235,13 @@ class KNNEngineInvariantTests(unittest.TestCase):
         self.assertEqual(proj_rows[0]["Age"], 36)
         self.assertAlmostEqual(float(proj_rows[0]["Points"]), 25.0)
 
-    def test_run_knn_projection_paces_integer_current_season_without_dtype_error(self):
-        """Allow partial-season pacing on integer counting stats without crashing."""
+    def test_run_knn_projection_never_paces_a_short_current_season(self):
+        """Project from the last row's actual value, never a full-season pace.
+
+        Pacing a 41-game 25-point season to 82 games doubled the forecast's
+        starting point; a 4-game start paced to 84 put a depth forward on a
+        100-point line. The pipeline now keeps partial seasons out entirely.
+        """
         career_df = pd.DataFrame(
             {
                 "Age": [30, 31],
@@ -271,7 +276,8 @@ class KNNEngineInvariantTests(unittest.TestCase):
 
         self.assertEqual(len(clone_names), 10)
         self.assertEqual(proj_rows[0]["Age"], 32)
-        self.assertGreater(float(proj_rows[0]["Points"]), 0.0)
+        # Clones go 50 -> 60 (blended target 58, +16%) from the actual 25, not a paced 50.
+        self.assertAlmostEqual(float(proj_rows[0]["Points"]), 29.0)
 
 
 class KNNProjectionMemoTests(unittest.TestCase):

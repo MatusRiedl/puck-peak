@@ -35,7 +35,8 @@ from nhl.constants import (
     TEAM_LINEAGES,
     normalize_league_abbrev,
 )
-from nhl.team_ratings import build_league_game_table, build_league_schedule
+from nhl.season_sim import FINAL_GAME_STATE_IDS
+from nhl.team_ratings import REGULAR_SEASON, build_league_game_table, build_league_schedule
 from nhl.win_prob import validate_model_artifact
 
 
@@ -1229,6 +1230,34 @@ def get_league_schedule(season_year: int) -> pd.DataFrame:
         return build_league_schedule(rows, team_map)
     except Exception:
         return pd.DataFrame()
+
+
+def regular_season_in_progress(season_year: int, today: date | None = None) -> bool:
+    """Return whether one season's regular season still has games left to play.
+
+    The age chart uses this to decide whether a player's latest season is a
+    partial one that must not be drawn or projected as if it were complete.
+    Reads the cached league schedule, which the predictions rail already warms.
+
+    Args:
+        season_year: Four-digit season start year.
+        today: Date used for the offseason fallback. Defaults to today.
+
+    Returns:
+        True while unplayed regular-season games remain. False for any season
+        other than the current one. If the schedule cannot be loaded, falls back
+        to "not May through August".
+    """
+    day = today or date.today()
+    if int(season_year) != current_season_year(day):
+        return False
+    schedule = get_league_schedule(int(season_year))
+    if schedule is None or schedule.empty or "GameTypeId" not in schedule.columns:
+        return day.month not in (5, 6, 7, 8)
+    regular = schedule[schedule["GameTypeId"].eq(REGULAR_SEASON)]
+    if regular.empty:
+        return day.month not in (5, 6, 7, 8)
+    return bool((~regular["GameStateId"].isin(FINAL_GAME_STATE_IDS)).any())
 
 
 @st.cache_data(ttl=900)

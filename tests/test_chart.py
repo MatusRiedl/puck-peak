@@ -500,6 +500,78 @@ class ChartTests(unittest.TestCase):
         self.assertTrue(all(trace.legendgroup == "Artemi Panarin" for trace in proj_glows))
         self.assertTrue(all(trace.showlegend is False for trace in proj_glows))
 
+    def test_render_chart_draws_in_progress_season_as_standalone_dot(self):
+        """Style the season-to-date row as one enlarged player-colored dot.
+
+        It must share the player's color and trace toggle, stay out of the
+        color map, and carry GP plus the full-season pace in its tooltip.
+        """
+        live_name = f"Paul Cotter{chart_module.LIVE_SEASON_SUFFIX}"
+        processed_df = pd.DataFrame(
+            {
+                "Age": [25, 26, 26, 27, 27],
+                "Points": [22, 15, 15, 16, 6],
+                "GP": [79, 79, 79, None, 4],
+                "SeasonYear": [2024, 2025, None, None, 2026],
+                "Player": ["Paul Cotter", "Paul Cotter", "Paul Cotter (Proj)", "Paul Cotter (Proj)", live_name],
+                "BaseName": ["Paul Cotter"] * 5,
+            }
+        )
+        captured = {}
+        fake_session_state = SimpleNamespace(do_predict=True, do_smooth=False, x_axis_mode="Age")
+
+        def _capture_plot(fig, **_kwargs):
+            captured["fig"] = fig
+            return None
+
+        with patch.object(chart_module.st, "markdown"), patch.object(chart_module.components, "html"), patch.object(
+            chart_module.st,
+            "plotly_chart",
+            side_effect=_capture_plot,
+        ), patch.object(
+            chart_module.st,
+            "session_state",
+            fake_session_state,
+            create=True,
+        ):
+            chart_module.render_chart(
+                processed_dfs=[processed_df],
+                metric="Points",
+                team_mode=False,
+                games_mode=False,
+                do_cumul=False,
+                do_base=False,
+                do_smooth=False,
+                stat_category="Skater",
+                historical_baselines={},
+                team_baselines={},
+                raw_dfs_cache=[],
+                ml_clones_dict={},
+                season_type="Regular",
+                sidebar_keys={},
+                do_era=False,
+            )
+
+        fig = captured["fig"]
+        real_trace = next(trace for trace in fig.data if trace.name == "Paul Cotter")
+        live_trace = next(trace for trace in fig.data if trace.name == live_name)
+        live_glows = [
+            trace for trace in fig.data
+            if trace.name == "_age_marker_glow" and list(trace.x) == [27]
+        ]
+
+        self.assertNotIn(live_name, fake_session_state.player_chart_colors)
+        self.assertEqual(live_trace.legendgroup, "Paul Cotter")
+        self.assertEqual(live_trace.mode, "markers")
+        self.assertEqual(list(live_trace.y), [6])
+        self.assertEqual(live_trace.marker.color, real_trace.line.color)
+        self.assertEqual(live_trace.marker.size, chart_module.LIVE_SEASON_MARKER_SIZE)
+        self.assertEqual(live_trace.selected.marker.size, chart_module.LIVE_SEASON_MARKER_SIZE)
+        self.assertIn("season in progress", live_trace.hovertemplate)
+        self.assertIn("4 GP so far · 84-game pace: 126", live_trace.hovertemplate)
+        self.assertEqual(len(live_glows), 1)
+        self.assertEqual(live_glows[0].legendgroup, "Paul Cotter")
+
     def test_render_chart_uses_distinct_skater_colors_for_multiple_players(self):
         """Give adjacent skater traces clearly different colors."""
         processed_df = pd.DataFrame(

@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from nhl.constants import LIVE_SEASON_SUFFIX, current_season_year
 from nhl.player_pipeline import process_players
 
 
@@ -359,6 +360,120 @@ class PlayerPipelineAgeModeZeroGPTests(unittest.TestCase):
         ppg = result[0].set_index("Age")["PPG"]
         self.assertTrue(pd.isna(ppg.loc[20]))           # guarded: NaN, not inf
         self.assertAlmostEqual(float(ppg.loc[21]), 1.0)  # normal bucket unaffected
+
+
+class PlayerPipelineInProgressSeasonTests(unittest.TestCase):
+    """Keep a few-games-old season off the real line and out of the forecast."""
+
+    @staticmethod
+    def _raw_df(points: list, gp: list) -> pd.DataFrame:
+        """Build NHL regular-season rows ending in the current season.
+
+        Args:
+            points: Points per season, oldest first.
+            gp: Games played per season, oldest first.
+
+        Returns:
+            Raw player frame shaped like `get_player_raw_stats()` output.
+        """
+        n = len(points)
+        last_year = current_season_year()
+        zeros = [0.0] * n
+        return pd.DataFrame(
+            {
+                "League": ["NHL"] * n,
+                "Age": list(range(27 - n + 1, 28)),
+                "SeasonYear": list(range(last_year - n + 1, last_year + 1)),
+                "GameType": ["Regular"] * n,
+                "GP": gp,
+                "Points": points,
+                "Goals": [p / 2 for p in points],
+                "Assists": [p / 2 for p in points],
+                "PIM": zeros, "+/-": zeros, "Shots": zeros, "TotalTOIMins": zeros,
+                "Wins": zeros, "Shutouts": zeros, "Saves": zeros,
+                "WeightedSV": zeros, "WeightedGAA": zeros,
+                "NHLeMultiplier": [1.0] * n,
+            }
+        )
+
+    def _run(self, raw_df: pd.DataFrame, in_progress: bool = True, do_cumul: bool = False):
+        """Run the age-mode pipeline with the linear fallback mocked.
+
+        Args:
+            raw_df: Raw player rows.
+            in_progress: What `regular_season_in_progress` reports.
+            do_cumul: Whether cumulative mode is on.
+
+        Returns:
+            Tuple of (processed frame, peak_info, fallback mock).
+        """
+        with patch("nhl.player_pipeline.get_player_raw_stats", return_value=(raw_df, "Test Skater", "C")), patch(
+            "nhl.player_pipeline.regular_season_in_progress", return_value=in_progress,
+        ), patch(
+            "nhl.player_pipeline.run_linear_fallback",
+            side_effect=lambda career_df, metric, max_age, stat_category: [
+                {"Age": age, metric: 20.0, "Player": "Test Skater", "BaseName": "Test Skater"}
+                for age in range(max_age + 1, 41)
+            ],
+        ) as mock_fallback:
+            processed, _, _, peak_info = process_players(
+                players={"99": "Test Skater"},
+                metric="Points",
+                hist_df=pd.DataFrame(),
+                id_to_name_map={},
+                clone_details_map={},
+                season_type="Regular",
+                stat_category="Skater",
+                do_era=False,
+                do_predict=True,
+                do_smooth=False,
+                do_cumul=do_cumul,
+                games_mode=False,
+                league_filter=["NHL"],
+            )
+        return processed[0], peak_info, mock_fallback
+
+    def test_partial_season_becomes_a_standalone_point(self):
+        """Split the current season off the real line and project from the last full one."""
+        frame, peak_info, mock_fallback = self._run(self._raw_df([18, 25, 15, 6], [55, 76, 79, 4]))
+
+        real = frame[frame["Player"] == "Test Skater"]
+        live = frame[frame["Player"] == f"Test Skater{LIVE_SEASON_SUFFIX}"]
+        proj = frame[frame["Player"] == "Test Skater (Proj)"]
+
+        self.assertEqual(real["Age"].tolist(), [24, 25, 26])
+        self.assertEqual(live["Age"].tolist(), [27])
+        self.assertAlmostEqual(float(live["Points"].iloc[0]), 6.0)
+        self.assertEqual(int(live["GP"].iloc[0]), 4)
+        # The forecast starts at the last full season, not at the 4-game one.
+        self.assertEqual(int(proj["Age"].min()), 26)
+        self.assertAlmostEqual(float(proj.loc[proj["Age"] == 26, "Points"].iloc[0]), 15.0)
+        career_df = mock_fallback.call_args.kwargs["career_df"]
+        self.assertEqual(int(career_df["Age"].max()), 26)
+        self.assertEqual(peak_info["Test Skater"]["age"], 25)
+
+    def test_cumulative_point_is_the_career_total_to_date(self):
+        """Plot the in-progress point at the real career total, not a pace."""
+        frame, _, _ = self._run(self._raw_df([18, 25, 15, 6], [55, 76, 79, 4]), do_cumul=True)
+
+        live = frame[frame["Player"] == f"Test Skater{LIVE_SEASON_SUFFIX}"]
+        real = frame[frame["Player"] == "Test Skater"]
+        self.assertAlmostEqual(float(real["Points"].iloc[-1]), 58.0)
+        self.assertAlmostEqual(float(live["Points"].iloc[0]), 64.0)
+
+    def test_finished_season_stays_on_the_real_line(self):
+        """Leave the latest season alone once the regular season is over."""
+        frame, _, _ = self._run(self._raw_df([18, 25, 15, 70], [55, 76, 79, 82]), in_progress=False)
+
+        self.assertFalse(frame["Player"].str.endswith(LIVE_SEASON_SUFFIX).any())
+        self.assertEqual(frame.loc[frame["Player"] == "Test Skater", "Age"].tolist(), [24, 25, 26, 27])
+
+    def test_single_partial_season_stays_a_real_point(self):
+        """Keep a first-year player's only season on the real trace."""
+        frame, _, _ = self._run(self._raw_df([6], [4]))
+
+        self.assertFalse(frame["Player"].str.endswith(LIVE_SEASON_SUFFIX).any())
+        self.assertEqual(frame["Age"].tolist(), [27])
 
 
 if __name__ == "__main__":

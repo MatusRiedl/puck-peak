@@ -260,6 +260,28 @@ class LeagueLoaderTests(unittest.TestCase):
         self.assertEqual(schedule_df.iloc[0]["HomeTeam"], "CAR")
         self.assertEqual(schedule_df.iloc[0]["AwayTeam"], "FLA")
 
+    def test_regular_season_in_progress_reads_unplayed_regular_games(self):
+        """Call the season open only while regular-season games remain unplayed."""
+        from datetime import date
+
+        october = date(2026, 10, 5)
+
+        def _schedule(game_types, states):
+            return pd.DataFrame({"GameTypeId": game_types, "GameStateId": states})
+
+        with patch.object(data_loaders, "get_league_schedule", return_value=_schedule([2, 2], [7, 1])):
+            self.assertTrue(data_loaders.regular_season_in_progress(2026, today=october))
+            # Only the current season can be in progress.
+            self.assertFalse(data_loaders.regular_season_in_progress(2025, today=october))
+        # Regular season all final; an unplayed playoff game does not reopen it.
+        with patch.object(data_loaders, "get_league_schedule", return_value=_schedule([2, 2, 3], [7, 6, 1])):
+            self.assertFalse(data_loaders.regular_season_in_progress(2026, today=october))
+        # No schedule: fall back on the calendar, offseason is May through August.
+        with patch.object(data_loaders, "get_league_schedule", return_value=pd.DataFrame()):
+            self.assertTrue(data_loaders.regular_season_in_progress(2026, today=october))
+            self.assertFalse(data_loaders.regular_season_in_progress(2025, today=date(2026, 6, 1)))
+            self.assertTrue(data_loaders.regular_season_in_progress(2025, today=date(2026, 3, 1)))
+
 
 class PlayerLandingLoaderTests(unittest.TestCase):
     """Cover the shared player landing payload helpers."""

@@ -9,10 +9,11 @@ Plotly-click bridge, and dispatches chart dialogs from first-click events.
 Visual conventions (from CLAUDE.md):
     Real data:   solid colored line, filled markers
     Projection:  dotted player-colored line, open circle markers
+    In progress: standalone enlarged dot with a light ring, season-to-date actual
     Baseline:    muted grey dashed line, visible round markers
 
 Imports from project:
-    nhl.constants — RATE_STATS, TEAM_RATE_STATS
+    nhl.constants — RATE_STATS, TEAM_RATE_STATS, LIVE_SEASON_SUFFIX, season_games
     nhl.dialog    — show_season_details
 """
 
@@ -28,7 +29,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from nhl.constants import (
-    RATE_STATS, TEAM_RATE_STATS,
+    LIVE_SEASON_SUFFIX, RATE_STATS, TEAM_RATE_STATS, season_games,
 )
 from nhl.dialog import show_season_details, show_team_game_details
 from nhl.era import metric_is_era_adjusted
@@ -55,6 +56,9 @@ CLICKABLE_AGE_MARKER_SIZE = 9
 CLICKABLE_AGE_MARKER_GLOW_SIZE = 16
 CLICKABLE_AGE_MARKER_GLOW_OPACITY = 0.115
 CLICKABLE_AGE_MARKER_OUTLINE = "rgba(255, 255, 255, 0.90)"
+LIVE_SEASON_MARKER_SIZE = 14
+LIVE_SEASON_MARKER_OUTLINE = "rgba(255, 255, 255, 0.95)"
+LIVE_SEASON_MARKER_OUTLINE_WIDTH = 2.5
 SEASON_MARKER_SIZE = 13
 SEASON_MARKER_GLOW_SIZE = 24
 SEASON_MARKER_GLOW_OPACITY = 0.101
@@ -538,7 +542,7 @@ def _build_trace_color_map(final_df: pd.DataFrame, stat_category: str, team_mode
         base_name = player_name if len(row) <= 1 or pd.isna(row[1]) else str(row[1])
         if player_name in seen_players:
             continue
-        if "(Proj)" in player_name or _is_baseline_trace(player_name):
+        if _trace_base_name(player_name) != player_name or _is_baseline_trace(player_name):
             continue
         seen_players.add(player_name)
         ordered_entries.append((player_name, base_name))
@@ -557,16 +561,16 @@ def _build_trace_color_map(final_df: pd.DataFrame, stat_category: str, team_mode
 
 
 def _build_plotly_color_map(final_df: pd.DataFrame, trace_color_map: dict[str, str]) -> dict[str, str]:
-    """Extend the real-trace color map with projection aliases for Plotly Express."""
+    """Extend the real-trace color map with projection and in-progress aliases for Plotly Express."""
     plotly_color_map = dict(trace_color_map)
     if final_df.empty or "Player" not in final_df.columns:
         return plotly_color_map
 
     for player_name in final_df["Player"].dropna():
         display_name = str(player_name)
-        if "(Proj)" not in display_name:
+        base_name = _trace_base_name(display_name)
+        if base_name == display_name:
             continue
-        base_name = display_name.replace(" (Proj)", "")
         if base_name in trace_color_map:
             plotly_color_map[display_name] = trace_color_map[base_name]
     return plotly_color_map
@@ -1364,6 +1368,33 @@ def _is_baseline_trace(trace_name: str) -> bool:
     return "baseline" in trace_name.casefold()
 
 
+def _is_live_season_trace(trace_name: str) -> bool:
+    """Return whether a trace is a player's in-progress season point.
+
+    Args:
+        trace_name: Visible Plotly trace label.
+
+    Returns:
+        bool: True for `<name> (Season to date)` traces.
+    """
+    return str(trace_name or "").endswith(LIVE_SEASON_SUFFIX)
+
+
+def _trace_base_name(trace_name: str) -> str:
+    """Return the player a projection or in-progress trace belongs to.
+
+    Args:
+        trace_name: Visible Plotly trace label.
+
+    Returns:
+        str: The label without its `(Proj)` or `(Season to date)` suffix.
+    """
+    clean = str(trace_name or "")
+    if _is_live_season_trace(clean):
+        return clean[: -len(LIVE_SEASON_SUFFIX)]
+    return clean.replace(" (Proj)", "")
+
+
 def _apply_special_trace_styling(fig: go.Figure, player_colors: dict[str, str | None]) -> None:
     """Reapply baseline and projection styling after shared trace updates.
 
@@ -1386,6 +1417,22 @@ def _apply_special_trace_styling(fig: go.Figure, player_colors: dict[str, str | 
             trace.marker.color = proj_color
             trace.marker.line.width = 0
             trace.marker.symbol = 'circle'
+        elif _is_live_season_trace(trace.name):
+            player_name = _trace_base_name(trace.name)
+            live_color = player_colors.get(player_name) or "gray"
+            live_marker = dict(
+                size=LIVE_SEASON_MARKER_SIZE,
+                color=live_color,
+                symbol='circle',
+                line=dict(width=LIVE_SEASON_MARKER_OUTLINE_WIDTH, color=LIVE_SEASON_MARKER_OUTLINE),
+            )
+            trace.legendgroup = player_name
+            trace.showlegend = False
+            trace.mode = 'markers'
+            trace.marker = live_marker
+            # Pin the selected look too, or a click shrinks the dot to the base size.
+            trace.selected = dict(marker=dict(size=LIVE_SEASON_MARKER_SIZE, color=live_color, opacity=1.0))
+            trace.unselected = dict(marker=dict(opacity=1.0))
         elif _is_baseline_trace(trace.name):
             trace.legendgroup = trace.name
             trace.showlegend = False
@@ -1403,6 +1450,61 @@ def _apply_special_trace_styling(fig: go.Figure, player_colors: dict[str, str | 
                 marker=dict(size=8, color=BASELINE_MARKER_COLOR, opacity=1.0)
             )
             trace.unselected = dict(marker=dict(opacity=1.0))
+
+
+_LIVE_PACE_METRICS = {'Points', 'Goals', 'Assists', 'Wins', 'Shutouts', 'Saves', '+/-', 'PIM'}
+"""Counting stats whose in-progress tooltip also shows a full-season pace."""
+
+
+def _apply_live_season_hover(fig: go.Figure, final_df: pd.DataFrame, metric: str, do_cumul: bool) -> None:
+    """Give each in-progress season dot a tooltip with games played and pace.
+
+    The dot plots the season-to-date actual, so on its own it sits below a
+    full-season forecast until spring. The tooltip carries the GP count and,
+    for counting stats, the full-season pace, which is what compares to the
+    forecast dot at the same age.
+
+    Args:
+        fig: Plotly figure to mutate in place.
+        final_df: Concatenated chart frame holding the in-progress rows.
+        metric: Active chart metric.
+        do_cumul: Whether the chart shows career running totals, where a
+            single-season pace means nothing and is left out.
+
+    Returns:
+        None.
+    """
+    if final_df.empty or "Player" not in final_df.columns:
+        return
+    live_df = final_df[final_df["Player"].astype(str).str.endswith(LIVE_SEASON_SUFFIX)]
+    if live_df.empty:
+        return
+
+    if metric in ["Save %", "SH%"]:
+        value_expr = "%{y:.1f}%"
+    else:
+        value_expr = f"%{{y:{'.2f' if metric in RATE_STATS else '.0f'}}}"
+
+    for trace in fig.data:
+        if not _is_live_season_trace(trace.name):
+            continue
+        rows = live_df[live_df["Player"] == trace.name]
+        if rows.empty:
+            continue
+        row = rows.iloc[0]
+        gp_raw = pd.to_numeric(row.get("GP"), errors="coerce")
+        gp = int(gp_raw) if pd.notna(gp_raw) else 0
+        detail = f"{gp} GP so far"
+        value = pd.to_numeric(row.get(metric), errors="coerce")
+        if not do_cumul and metric in _LIVE_PACE_METRICS and gp > 0 and pd.notna(value):
+            season_year = pd.to_numeric(row.get("SeasonYear"), errors="coerce")
+            games = season_games(int(season_year)) if pd.notna(season_year) else season_games()
+            detail += f" · {games}-game pace: {float(value) * games / gp:.0f}"
+        trace.hovertemplate = (
+            "<b>Click for details</b><br><br><b>%{customdata[0]}</b><br>"
+            "Age %{x} · season in progress<br>"
+            f"{value_expr} {metric}<br>{detail}<extra></extra>"
+        )
 
 
 def _with_alpha(color: str | None, alpha: float) -> str:
@@ -1482,7 +1584,7 @@ def _build_marker_glow_traces(
         if "(Proj)" in trace.name and not include_projection_traces:
             continue
 
-        player_name = trace.name.replace(" (Proj)", "")
+        player_name = _trace_base_name(trace.name)
         player_color = player_colors.get(player_name) or getattr(trace.marker, "color", None) or trace.line.color
         glow_traces.append(
             go.Scatter(
@@ -1944,11 +2046,12 @@ def render_chart(
     # First pass: wire legend groups and capture projection data
     for trace in fig.data:
         if "(Proj)" not in trace.name and not _is_baseline_trace(trace.name):
-            assigned = player_colors.get(trace.name)
+            # In-progress dots share the player's color and legend toggle.
+            assigned = player_colors.get(_trace_base_name(trace.name))
             if assigned:
                 trace.line.color = assigned
                 trace.marker.color = assigned
-            trace.legendgroup = trace.name
+            trace.legendgroup = _trace_base_name(trace.name)
         elif _is_baseline_trace(trace.name):
             trace.legendgroup = trace.name
     
@@ -2203,6 +2306,7 @@ def render_chart(
         _disable_click_selection_dimming(fig, include_projection_traces=True)
 
     _apply_special_trace_styling(fig, player_colors)
+    _apply_live_season_hover(fig, final_df, metric, do_cumul)
     if not team_mode:
         fig.update_traces(showlegend=False)
 

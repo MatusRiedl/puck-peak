@@ -797,7 +797,7 @@ class ComparisonTests(unittest.TestCase):
             comparison_module._render_overview_players(
                 processed_dfs=[processed_df],
                 players={"99": "Wayne Gretzky"},
-                peak_info={},
+                peak_info={"Wayne Gretzky": {"age": 19, "season_year": 1979, "y": 142}},
                 metric="Points",
                 stat_category="Skater",
                 season_type="Regular",
@@ -807,6 +807,8 @@ class ComparisonTests(unittest.TestCase):
         self.assertIn("<strong style='color:#7b61ff;'>Wayne Gretzky</strong>", card_markup)
         self.assertIn("comparison-card-context-row", card_markup)
         self.assertIn("#1 in all-time Points", card_markup)
+        # SeasonYear is the start year: 1979 is 1979-80, not 1978-79.
+        self.assertIn("Best at age 19 (1979-80) -- 142 Pts in 80 GP", card_markup)
         self.assertIn("comparison-trace-toggle-row", card_markup)
         self.assertIn("comparison-card-shell--clickable", card_markup)
         self.assertIn("data-identity-card='player:99'", card_markup)
@@ -823,7 +825,7 @@ class ComparisonTests(unittest.TestCase):
                     "total_goals": 12000,
                     "total_gp": 6200,
                     "wins_rank": 2,
-                    "best_year": 1948,
+                    "best_year": 1947,
                     "best_wins": 32,
                     "best_gp": 60,
                 }
